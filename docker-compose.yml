@@ -38,6 +38,8 @@ services:
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
       TELEGRAM_BOT_TOKEN: replace-me
+      PUBLIC_API_KEY: ${PUBLIC_API_KEY:-replace-me}
+      API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-60}
       ANTHROPIC_API_KEY: replace-me
       TWITTER_BEARER_TOKEN: replace-me
       ENVIRONMENT: dev

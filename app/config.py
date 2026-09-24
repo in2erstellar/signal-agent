@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     helius_rpc_url: str = "https://mainnet.helius-rpc.com"
     raydium_api_base_url: str = "https://api-v3.raydium.io"
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
+    public_api_key: SecretStr = Field(default=SecretStr(""))
+    api_rate_limit_per_minute: int = 60
     anthropic_api_key: SecretStr = Field(default=SecretStr(""))
     twitter_bearer_token: SecretStr = Field(default=SecretStr(""))
     environment: Literal["dev", "prod"] = "dev"
@@ -83,6 +85,13 @@ class Settings(BaseSettings):
     def redis_url_must_be_redis(cls, value: str) -> str:
         if not value.startswith(("redis://", "rediss://")):
             raise ValueError("REDIS_URL must start with redis:// or rediss://")
+        return value
+
+    @field_validator("api_rate_limit_per_minute")
+    @classmethod
+    def rate_limit_must_be_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("API_RATE_LIMIT_PER_MINUTE must be at least 1")
         return value
 
     @field_validator("helius_api_base_url", "helius_rpc_url", "raydium_api_base_url")

@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
+from app.api.router import public_router
 from app.api.webhooks import router as webhooks_router
 from app.config import get_settings
 from app.db.base import create_engine, create_sessionmaker
@@ -42,8 +43,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await engine.dispose()
 
 
-app = FastAPI(title="SignalForge", lifespan=lifespan)
+app = FastAPI(
+    title="SignalForge",
+    description=(
+        "Public read and watchlist API over stored signals. "
+        "Send the X-API-Key header. A risk_score of 100 is not a claim that a token is safe."
+    ),
+    lifespan=lifespan,
+)
 app.include_router(webhooks_router)
+app.include_router(public_router)
 
 
 @app.get("/health")

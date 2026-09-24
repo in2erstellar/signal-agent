@@ -1,1 +1,1 @@
-"""FastAPI routers. Empty until domain endpoints are added."""
+"""FastAPI routers for webhooks and the public REST API."""
