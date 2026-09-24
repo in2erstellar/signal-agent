@@ -138,6 +138,23 @@ if BAIT_SELL_WINDOW_START_MINUTES >= BAIT_SELL_WINDOW_END_MINUTES:
 if BAIT_RECHECK_DELAY_MINUTES < BAIT_SELL_WINDOW_END_MINUTES:
     raise RuntimeError("bait recheck must not be due before the sell window ends")
 
+# Redis names for the pipeline. Bait jobs are delayed, so they live in a
+# sorted set scored by scheduled_at. Risk scans are immediate, so they use a stream.
+RISK_SCAN_QUEUE = "risk_scan_queue"
+BAIT_CHECK_QUEUE = "bait_check_queue"
+RISK_SCAN_GROUP = "risk_scan_workers"
+
+BAIT_POLL_INTERVAL_SECONDS = 60
+SIGNAL_FUSION_INTERVAL_SECONDS = 30
+SIGNAL_RISK_SCAN_MAX_AGE_MINUTES = 5
+
+# composite = risk * 0.5 + wallet * 0.3 - bait_penalty * 0.2
+# A score equal to the threshold does not create a signal.
+SIGNAL_RISK_WEIGHT = Decimal("0.5")
+SIGNAL_WALLET_WEIGHT = Decimal("0.3")
+SIGNAL_BAIT_WEIGHT = Decimal("0.2")
+SIGNAL_THRESHOLD = Decimal("50")
+
 if sum(RISK_CHECK_WEIGHTS.values()) != 100:
     raise RuntimeError("RISK_CHECK_WEIGHTS must sum to 100")
 

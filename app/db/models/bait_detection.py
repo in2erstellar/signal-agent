@@ -7,7 +7,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Uuid, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,5 +72,11 @@ class BaitFlag(Base):
         CheckConstraint(
             "confidence >= 0 AND confidence <= 1",
             name="confidence_range",
+        ),
+        UniqueConstraint(
+            "wallet_id",
+            "token_id",
+            "flag_type",
+            name="uq_bait_flags_wallet_token_type",
         ),
     )

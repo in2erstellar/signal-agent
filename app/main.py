@@ -8,9 +8,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
+from app.api.webhooks import router as webhooks_router
 from app.config import get_settings
 from app.db.base import create_engine, create_sessionmaker
 from app.health import probe_database, probe_redis
+from app.workers.wallet_watcher import WalletWatcher
 
 logger = structlog.get_logger(__name__)
 
@@ -27,6 +29,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         socket_timeout=5,
         decode_responses=True,
     )
+    app.state.watcher = WalletWatcher(
+        app.state.session_factory,
+        app.state.redis,
+        settings.helius_webhook_secret.get_secret_value(),
+    )
     logger.info("service_started", environment=settings.environment)
     try:
         yield
@@ -36,6 +43,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="SignalForge", lifespan=lifespan)
+app.include_router(webhooks_router)
 
 
 @app.get("/health")

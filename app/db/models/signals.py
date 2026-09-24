@@ -7,7 +7,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, Uuid, false, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    UniqueConstraint,
+    Uuid,
+    false,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -51,4 +60,5 @@ class Signal(Base):
             "risk_score IS NULL OR (risk_score >= 0 AND risk_score <= 100)",
             name="risk_score_range",
         ),
+        UniqueConstraint("token_id", name="uq_signals_token_id"),
     )

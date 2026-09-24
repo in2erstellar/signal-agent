@@ -235,6 +235,23 @@ class BaitDetector:
         )
         return [flag] if flag is not None else []
 
+    async def evaluate_mature_buy(self, pending: PendingBaitCheck) -> list[BaitFlag]:
+        """Run all three patterns after the delay. Does not schedule another check."""
+        flags = list(await self.complete_pending_check(pending))
+        hidden = await self._detect_hidden_dual_position(
+            pending.wallet_address,
+            pending.token_mint,
+        )
+        if hidden is not None:
+            flags.append(hidden)
+        member = await self._detect_funder_cluster_member(
+            pending.wallet_address,
+            pending.token_mint,
+        )
+        if member is not None:
+            flags.append(member)
+        return flags
+
     async def _schedule_dump_recheck(
         self,
         wallet_address: str,

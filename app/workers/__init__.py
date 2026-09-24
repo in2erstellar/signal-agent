@@ -1,7 +1,6 @@
 """Background jobs.
 
-The bait recheck worker is not here yet. It should read matured
-``PendingBaitCheck`` records from ``BAIT_PENDING_STREAM`` and call
-``BaitDetector.complete_pending_check``. Waiting until ``scheduled_at``
-(consumer group, Celery beat, or APScheduler) is intentionally undecided.
+``python -m app.workers.runner`` runs the risk-scan, bait-check, and
+signal-fusion loops. The Helius webhook handler lives in ``wallet_watcher``
+and is mounted by the API process.
 """

@@ -25,7 +25,7 @@ services:
       timeout: 5s
       retries: 20
 
-  signalforge:
+  api:
     build: .
     ports:
       - "8000:8000"
@@ -59,6 +59,28 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.workers.runner"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://signalforge:signalforge@postgres:5432/signalforge
+      REDIS_URL: redis://redis:6379/0
+      HELIUS_API_KEY: replace-me
+      HELIUS_WEBHOOK_SECRET: replace-me
+      HELIUS_API_BASE_URL: https://api.helius.xyz
+      HELIUS_RPC_URL: https://mainnet.helius-rpc.com
+      RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
+      TELEGRAM_BOT_TOKEN: replace-me
+      ANTHROPIC_API_KEY: replace-me
+      TWITTER_BEARER_TOKEN: replace-me
+      ENVIRONMENT: dev
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:
