@@ -95,6 +95,8 @@ docker compose -f docker-compose.prod.yml exec api alembic upgrade head
 | `HELIUS_RPC_URL` | По умолчанию `https://mainnet.helius-rpc.com`. |
 | `RAYDIUM_API_BASE_URL` | По умолчанию `https://api-v3.raydium.io`. |
 | `TELEGRAM_BOT_TOKEN` | Токен BotFather. Пусто или `replace-me` — бот не стартует. |
+| `TELEGRAM_CHANNEL_ID` | Канал для общей ленты: `-100…` или `@name`. Пусто — посты только в личку. Бот должен быть администратором канала. |
+| `TELEGRAM_BOT_USERNAME` | Публичный username бота для ссылки на странице `/`. |
 | `PUBLIC_API_KEY` | Секрет заголовка `X-API-Key`. Пусто или `replace-me` — публичное API отвечает 503. |
 | `API_RATE_LIMIT_PER_MINUTE` | Лимит на один ключ. По умолчанию 60. |
 | `ANTHROPIC_API_KEY` | Зарезервировано, в MVP не вызывается. |
@@ -107,6 +109,7 @@ docker compose -f docker-compose.prod.yml exec api alembic upgrade head
 ## API
 
 - `POST /webhooks/helius` — приём Helius, без `X-API-Key`.
+- `GET /` — страница для подписчиков канала: что означает пост, как включить личный порог, дисклеймер.
 - `GET /health` — Postgres и Redis.
 - `GET /metrics` — Prometheus: обработанные webhook, отправленные алерты, латентность risk scan, размер `risk_scan_queue` и `bait_check_queue`.
 - `/docs` — публичное API: watchlist, сигналы, риск токена, настройки пользователя. Заголовок `X-API-Key`.

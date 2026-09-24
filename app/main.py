@@ -5,16 +5,18 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
+from app.adapters.telegram_bot import bot_public_url
 from app.api.router import public_router
 from app.api.webhooks import router as webhooks_router
 from app.config import get_settings
 from app.db.base import create_engine, create_sessionmaker
 from app.health import probe_database, probe_redis
 from app.observability import collect_queue_sizes
+from app.templates import channel_page
 from app.workers.wallet_watcher import WalletWatcher
 
 logger = structlog.get_logger(__name__)
@@ -55,6 +57,12 @@ app = FastAPI(
 )
 app.include_router(webhooks_router)
 app.include_router(public_router)
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def home() -> HTMLResponse:
+    username = get_settings().telegram_bot_username
+    return HTMLResponse(channel_page(bot_url=bot_public_url(username)))
 
 
 @app.get("/metrics", include_in_schema=False)

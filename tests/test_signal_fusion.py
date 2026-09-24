@@ -13,6 +13,7 @@ from app.db.models import Signal, Token
 from app.workers.signal_fusion import (
     SignalFusion,
     composite_score,
+    composite_without_wallet,
     emits_signal,
     wallet_score_from_win_rates,
 )
@@ -43,6 +44,10 @@ def test_composite_formula_and_exact_threshold() -> None:
 
     assert wallet_score_from_win_rates([Decimal("0.01"), None]) == Decimal("1")
     assert wallet_score_from_win_rates([None]) == Decimal(0)
+    # A null win rate is unknown, so the wallet term is dropped and rescaled.
+    unknown = composite_without_wallet(Decimal("100"), Decimal("0"))
+    assert unknown == Decimal("71.43")
+    assert emits_signal(unknown) is True
 
 
 async def test_fusion_skips_the_exact_threshold_and_writes_just_above(pipeline_infra: object) -> None:
@@ -94,13 +99,41 @@ async def test_fusion_skips_the_exact_threshold_and_writes_just_above(pipeline_i
             assert rows[0].wallet_score == Decimal("1")
             assert await session.scalar(select(func.count()).select_from(Signal)) == 1
 
+        fresh = make_token(mint="mint-new", risk_score=Decimal("100"), updated_at=NOW)
+        blank = make_tracked_wallet(address="wallet-blank", win_rate=None)
+        async with sessions() as session:
+            async with session.begin():
+                session.add_all([fresh, blank])
+                await session.flush()
+                session.add(
+                    make_wallet_tx(
+                        wallet_id=blank.id,
+                        token_id=fresh.id,
+                        action="buy",
+                        amount_sol=Decimal("1"),
+                        block_time=NOW,
+                        tx_signature="buy-new",
+                    )
+                )
+        processed_new, failed_new, created_new = await fusion.run_once()
+        assert (processed_new, failed_new, created_new) == (2, 0, 1)
+        async with sessions() as session:
+            new_token = await session.scalar(select(Token).where(Token.mint == "mint-new"))
+            assert new_token is not None
+            created_row = await session.scalar(
+                select(Signal).where(Signal.token_id == new_token.id)
+            )
+            assert created_row is not None
+            assert created_row.wallet_score is None
+            assert created_row.composite_score == Decimal("71.43")
+
         again, failed_again, created_again = await fusion.run_once()
         # The below-threshold mint is still inside the scan window and has no
         # signal, so it is considered again. The mint that already has a
         # signal is not.
         assert (again, failed_again, created_again) == (1, 0, 0)
         async with sessions() as session:
-            assert await session.scalar(select(func.count()).select_from(Signal)) == 1
+            assert await session.scalar(select(func.count()).select_from(Signal)) == 2
     finally:
         await truncate_pipeline(engine)
         await engine.dispose()

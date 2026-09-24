@@ -1,20 +1,23 @@
 """Fold a fresh risk scan, wallet quality, and bait flags into one signal.
 
 ``wallet_score`` is the mean ``tracked_wallets.win_rate`` of wallets that
-bought the mint, scaled from a 0–1 fraction to 0–100. Missing win rates
-contribute nothing. ``bait_flag_penalty`` is the sum of confidences on
-``bait_flags`` for that mint.
+bought the mint, scaled from a 0–1 fraction to 0–100. A stored win rate of
+0 is a known result and keeps the full formula. If every buyer has a null
+win rate, the wallet term is unknown: it is left empty and the risk and
+bait weights are scaled to the same 0–100 range. Treating that case as 0
+would cap a perfect scan at 50, which does not clear the threshold.
 
-A composite equal to ``SIGNAL_THRESHOLD`` does not create a row. The scan
-must be newer than ``SIGNAL_RISK_SCAN_MAX_AGE_MINUTES``. One signal per
-token is enforced by ``uq_signals_token_id``.
+``bait_flag_penalty`` is the sum of confidences on ``bait_flags`` for that
+mint. A composite equal to ``SIGNAL_THRESHOLD`` does not create a row. The
+scan must be newer than ``SIGNAL_RISK_SCAN_MAX_AGE_MINUTES``. One signal
+per token is enforced by ``uq_signals_token_id``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 import structlog
@@ -64,6 +67,19 @@ def wallet_score_from_win_rates(win_rates: list[Decimal | None]) -> Decimal:
     if scaled > 100:
         return Decimal(100)
     return scaled
+
+
+def wallet_history_known(win_rates: list[Decimal | None]) -> bool:
+    return any(rate is not None for rate in win_rates)
+
+
+def composite_without_wallet(risk_score: Decimal, bait_flag_penalty: Decimal) -> Decimal:
+    """Risk and bait only, scaled so a perfect scan with no penalty is 100."""
+    weight = SIGNAL_RISK_WEIGHT + SIGNAL_BAIT_WEIGHT
+    raw = (
+        risk_score * SIGNAL_RISK_WEIGHT - bait_flag_penalty * SIGNAL_BAIT_WEIGHT
+    ) / weight
+    return raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 class SignalFusion:
@@ -131,14 +147,19 @@ class SignalFusion:
                 )
             ).all()
         ]
-        wallet_score = wallet_score_from_win_rates(win_rates)
         penalty = await session.scalar(
             select(func.coalesce(func.sum(BaitFlag.confidence), 0)).where(
                 BaitFlag.token_id == token.id
             )
         )
         risk = token.risk_score if token.risk_score is not None else Decimal(0)
-        score = composite_score(risk, wallet_score, Decimal(penalty or 0))
+        bait_penalty = Decimal(penalty or 0)
+        if wallet_history_known(win_rates):
+            wallet_score: Decimal | None = wallet_score_from_win_rates(win_rates)
+            score = composite_score(risk, wallet_score, bait_penalty)
+        else:
+            wallet_score = None
+            score = composite_without_wallet(risk, bait_penalty)
         if not emits_signal(score):
             with bind_trace(token.trace_id):
                 logger.info(
@@ -170,7 +191,7 @@ class SignalFusion:
                     mint=token.mint,
                     composite_score=str(score),
                     risk_score=str(risk),
-                    wallet_score=str(wallet_score),
+                    wallet_score=str(wallet_score) if wallet_score is not None else None,
                     bait_flag_penalty=str(penalty or 0),
                 )
         return inserted

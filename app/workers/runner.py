@@ -113,6 +113,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             PerChatRateLimiter,
             TelegramAlertSender,
             build_application,
+            channel_target,
             telegram_configured,
         )
 
@@ -126,6 +127,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             sessions,
             TelegramAlertSender(application.bot, PerChatRateLimiter()),
             stop=stop,
+            channel_id=channel_target(settings.telegram_channel_id),
         )
         await application.initialize()
         await application.start()

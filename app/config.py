@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     helius_rpc_url: str = "https://mainnet.helius-rpc.com"
     raydium_api_base_url: str = "https://api-v3.raydium.io"
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
+    # Public channel chat id (-100…) or @name. Empty means alerts stay in direct chats.
+    telegram_channel_id: str = ""
+    # Public @username of the bot, without a token. Used only for the t.me link on /.
+    telegram_bot_username: str = ""
     public_api_key: SecretStr = Field(default=SecretStr(""))
     api_rate_limit_per_minute: int = 60
     anthropic_api_key: SecretStr = Field(default=SecretStr(""))

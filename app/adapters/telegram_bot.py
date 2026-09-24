@@ -59,10 +59,10 @@ class PerChatRateLimiter:
         self._interval = interval_seconds
         self._sleep = sleep or asyncio.sleep
         self._clock = clock or time.monotonic
-        self._locks: dict[int, asyncio.Lock] = {}
-        self._next_at: dict[int, float] = {}
+        self._locks: dict[int | str, asyncio.Lock] = {}
+        self._next_at: dict[int | str, float] = {}
 
-    async def wait(self, chat_id: int) -> None:
+    async def wait(self, chat_id: int | str) -> None:
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             now = self._clock()
@@ -83,7 +83,7 @@ class AlertBot(Protocol):
     async def send_message(
         self,
         *,
-        chat_id: int,
+        chat_id: int | str,
         text: str,
         parse_mode: str,
         link_preview_options: LinkPreviewOptions,
@@ -97,7 +97,7 @@ class TelegramAlertSender:
         self._bot = bot
         self._limiter = limiter or PerChatRateLimiter()
 
-    async def send(self, chat_id: int, text: str) -> None:
+    async def send(self, chat_id: int | str, text: str) -> None:
         await self._limiter.wait(chat_id)
         await self._bot.send_message(
             chat_id=chat_id,
@@ -110,6 +110,29 @@ class TelegramAlertSender:
 def telegram_configured(token: str) -> bool:
     cleaned = token.strip()
     return bool(cleaned) and cleaned != "replace-me"
+
+
+def channel_target(raw: str) -> int | str | None:
+    """Chat id or @username for the public channel. Empty disables channel posts."""
+    cleaned = raw.strip()
+    if not cleaned or cleaned == "replace-me":
+        return None
+    if cleaned.lstrip("-").isdigit() and cleaned not in ("-", ""):
+        return int(cleaned)
+    name = cleaned[1:] if cleaned.startswith("@") else cleaned
+    if not name.replace("_", "").isalnum():
+        return None
+    return f"@{name}"
+
+
+def bot_public_url(username: str) -> str | None:
+    """t.me link for the page. The bot token never appears here."""
+    name = username.strip().lstrip("@")
+    if not name or name == "replace-me":
+        return None
+    if not name.replace("_", "").isalnum():
+        return None
+    return f"https://t.me/{name}"
 
 
 def build_application(
