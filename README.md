@@ -19,9 +19,21 @@
 ```bash
 uv sync --group dev
 uv run pytest tests/test_health.py
+uv run pytest tests/test_models.py
 ```
 
 `tests/test_health.py` использует явно помеченные mock-фикстуры драйверов. Живые Postgres и Redis проверяет `GET /health` у контейнера.
+
+`tests/test_models.py` нужен запущенный Postgres с TimescaleDB (`docker-compose up -d postgres`). Тест сам создаёт отдельную базу и гоняет Alembic.
+
+## Миграции
+
+Образ Postgres в compose: `timescale/timescaledb:2.30.1-pg16-oss`.
+
+```bash
+docker-compose up -d postgres
+uv run alembic upgrade head
+```
 
 ## Правила в каждом промпте
 
@@ -35,4 +47,4 @@ uv run pytest tests/test_health.py
 
 ## Стек
 
-Python 3.11+, FastAPI, SQLAlchemy 2.0 (async) + Alembic, PostgreSQL 16, Redis 7, httpx, structlog, pytest + pytest-asyncio, Docker Compose. Зависимости закреплены в `pyproject.toml` и `uv.lock`.
+Python 3.11+, FastAPI, SQLAlchemy 2.0 (async) + Alembic, PostgreSQL 16 + TimescaleDB, Redis 7, httpx, structlog, pytest + pytest-asyncio, Docker Compose. Зависимости закреплены в `pyproject.toml` и `uv.lock`.
