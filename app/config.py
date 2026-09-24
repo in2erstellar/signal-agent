@@ -114,6 +114,30 @@ FUNDER_CLUSTER_RISK_CONFIDENCE = Decimal("0.5")
 # Share of current LP supply that must sit at a burn address or known lock program.
 LP_LOCKED_MIN_SHARE = Decimal("0.95")
 
+# Copy-trade bait heuristics. Recalibrate here; BaitDetector only reads them.
+# Volume spike is strict: exactly 3x the token's own baseline is not a flag.
+BAIT_VOLUME_SPIKE_MULTIPLE = Decimal("3")
+# Share of the SOL-notional position sold inside the sell window. Inclusive.
+BAIT_MIN_SOLD_SHARE = Decimal("0.50")
+# Other wallets' buys in this many minutes after the tracked buy.
+BAIT_INFLUX_WINDOW_MINUTES = 5
+# Sells count only inside [start, end] minutes after the tracked buy.
+BAIT_SELL_WINDOW_START_MINUTES = 15
+BAIT_SELL_WINDOW_END_MINUTES = 60
+# Phase-1 schedules the recheck at now + this delay. The worker is separate.
+BAIT_RECHECK_DELAY_MINUTES = 60
+# Average other-wallet buy volume is taken over this lookback, then scaled
+# to one influx window. A zero lookback total does not produce a multiple.
+BAIT_BASELINE_LOOKBACK_MINUTES = 60
+BAIT_PENDING_STREAM = "signalforge:bait:pending"
+
+if BAIT_BASELINE_LOOKBACK_MINUTES <= 0 or BAIT_INFLUX_WINDOW_MINUTES <= 0:
+    raise RuntimeError("bait volume windows must be positive")
+if BAIT_SELL_WINDOW_START_MINUTES >= BAIT_SELL_WINDOW_END_MINUTES:
+    raise RuntimeError("bait sell window must have a positive length")
+if BAIT_RECHECK_DELAY_MINUTES < BAIT_SELL_WINDOW_END_MINUTES:
+    raise RuntimeError("bait recheck must not be due before the sell window ends")
+
 if sum(RISK_CHECK_WEIGHTS.values()) != 100:
     raise RuntimeError("RISK_CHECK_WEIGHTS must sum to 100")
 
