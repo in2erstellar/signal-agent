@@ -63,6 +63,22 @@ uv run alembic upgrade head
 
 Образ Postgres: `timescale/timescaledb:2.30.1-pg16-oss`.
 
+## Как создать Helius webhook вручную перед первым запуском
+
+Бот webhook не создаёт. Один раз его заводит человек в кабинете, дальше `/watch` только дописывает адрес в `accountAddresses` через `PUT /v0/webhooks/{id}`.
+
+1. Откройте [Helius Dashboard → Webhooks](https://dashboard.helius.dev/webhooks) под ключом из `HELIUS_API_KEY`.
+2. Create Webhook. Network: **Mainnet**.
+3. Webhook type: **Enhanced** (`enhanced`, не `enhancedDevnet`).
+4. Transaction types: **SWAP** и **TRANSFER**.
+5. Webhook URL: публичный `https://<ваш-хост>/webhooks/helius`. Локальный `localhost` Helius не вызовет.
+6. Authentication header: та же строка, что `HELIUS_WEBHOOK_SECRET`. Helius присылает её в `Authorization`, и API сравнивает значение целиком.
+7. Account addresses можно оставить пустым. Адреса добавит `/watch`.
+8. Сохраните webhook и скопируйте его id в `HELIUS_WEBHOOK_ID`.
+9. Перезапустите worker. Пока id пустой, `/watch` отвечает, что webhook не задан, и строку в базу не пишет.
+
+Документация метода: [Webhooks API](https://www.helius.dev/docs/api-reference/webhooks/llms.txt). Обновление адреса читает текущий webhook и отправляет обратно `webhookURL`, `webhookType`, `transactionTypes` и новый `accountAddresses`, чтобы PUT не стёр тип событий.
+
 ## Деплой
 
 Продакшен-файл не монтирует код. API и worker используют один собранный образ `signalforge:prod`. У каждого сервиса есть healthcheck, `restart: unless-stopped` и лимит CPU/памяти. Postgres и Redis наружу не публикуются.
@@ -91,6 +107,7 @@ docker compose -f docker-compose.prod.yml exec api alembic upgrade head
 | `REDIS_URL` | `redis://` или `rediss://` |
 | `HELIUS_API_KEY` | Ключ Helius. В URL не класть. |
 | `HELIUS_WEBHOOK_SECRET` | Полное значение заголовка `Authorization`, которое Helius повторяет из `authHeader`. |
+| `HELIUS_WEBHOOK_ID` | Id webhook, созданного один раз в Helius Dashboard. Пусто — `/watch` не сохраняет кошелёк. |
 | `HELIUS_API_BASE_URL` | По умолчанию `https://api.helius.xyz`. |
 | `HELIUS_RPC_URL` | По умолчанию `https://mainnet.helius-rpc.com`. |
 | `RAYDIUM_API_BASE_URL` | По умолчанию `https://api-v3.raydium.io`. |

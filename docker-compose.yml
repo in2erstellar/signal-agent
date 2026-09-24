@@ -34,6 +34,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       HELIUS_API_KEY: replace-me
       HELIUS_WEBHOOK_SECRET: replace-me
+      HELIUS_WEBHOOK_ID: ${HELIUS_WEBHOOK_ID:-}
       HELIUS_API_BASE_URL: https://api.helius.xyz
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
@@ -71,6 +72,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       HELIUS_API_KEY: replace-me
       HELIUS_WEBHOOK_SECRET: replace-me
+      HELIUS_WEBHOOK_ID: ${HELIUS_WEBHOOK_ID:-}
       HELIUS_API_BASE_URL: https://api.helius.xyz
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io

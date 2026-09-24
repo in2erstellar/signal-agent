@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     redis_url: str
     helius_api_key: SecretStr = Field(default=SecretStr(""))
     helius_webhook_secret: SecretStr = Field(default=SecretStr(""))
+    # Existing webhook created once in the Helius dashboard. Empty disables /watch.
+    helius_webhook_id: str = ""
     helius_api_base_url: str = "https://api.helius.xyz"
     helius_rpc_url: str = "https://mainnet.helius-rpc.com"
     raydium_api_base_url: str = "https://api-v3.raydium.io"

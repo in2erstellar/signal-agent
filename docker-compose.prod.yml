@@ -7,6 +7,7 @@ x-app-env: &app-env
   REDIS_URL: redis://redis:6379/0
   HELIUS_API_KEY: ${HELIUS_API_KEY:?set HELIUS_API_KEY}
   HELIUS_WEBHOOK_SECRET: ${HELIUS_WEBHOOK_SECRET:?set HELIUS_WEBHOOK_SECRET}
+  HELIUS_WEBHOOK_ID: ${HELIUS_WEBHOOK_ID:-}
   HELIUS_API_BASE_URL: ${HELIUS_API_BASE_URL:-https://api.helius.xyz}
   HELIUS_RPC_URL: ${HELIUS_RPC_URL:-https://mainnet.helius-rpc.com}
   RAYDIUM_API_BASE_URL: ${RAYDIUM_API_BASE_URL:-https://api-v3.raydium.io}

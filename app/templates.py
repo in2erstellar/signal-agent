@@ -25,7 +25,7 @@ def welcome_text() -> str:
         "/status — настройки и алерты за 24 часа\n"
         "\n"
         "Бот ничего не покупает и не продаёт. "
-        "Адрес из /watch попадает в базу; подписку Helius на этот адрес нужно включить отдельно.\n"
+        "/watch дописывает адрес в уже созданный Helius webhook.\n"
         f"{DISCLAIMER}"
     )
 
@@ -129,10 +129,22 @@ def watch_invalid_text() -> str:
 
 def watch_saved_text(address: str, label: str | None) -> str:
     name = f" ({label})" if label else ""
+    return f"Кошелёк добавлен и подписка на Helius активна{name}: {address}"
+
+
+def watch_subscribe_failed_text() -> str:
+    return "Не удалось подписаться на мониторинг, попробуйте позже."
+
+
+def watch_webhook_missing_text() -> str:
     return (
-        f"Кошелёк записан{name}: {address}\n"
-        "Сделки появятся, когда Helius webhook уже включает этот адрес."
+        "HELIUS_WEBHOOK_ID не задан. Создайте webhook один раз в Helius Dashboard "
+        "и запишите его id в окружение. Кошелёк не сохранён."
     )
+
+
+def unwatch_unsubscribe_failed_text() -> str:
+    return "Не удалось снять подписку Helius. Кошелёк оставлен в списке, попробуйте позже."
 
 
 def watch_duplicate_text() -> str:

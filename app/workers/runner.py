@@ -124,6 +124,8 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             return
         owners = owner_ids(settings.telegram_owner_ids)
         application = build_application(token, sessions, owners=owners)
+        application.bot_data["helius"] = helius
+        application.bot_data["webhook_id"] = settings.helius_webhook_id.strip()
         dispatcher = AlertDispatcher(
             sessions,
             TelegramAlertSender(application.bot, PerChatRateLimiter()),

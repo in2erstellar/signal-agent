@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Protocol
 
+import structlog
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
+from app.adapters.helius import HeliusError
 from app.api.schemas import WalletCreate
 from app.api.token_risk import report_from_token
 from app.config import (
@@ -29,7 +31,7 @@ from app.config import (
     MAX_RISK_CHOICES,
     MIN_SCORE_CHOICES,
 )
-from app.db.models import AlertDelivery, Signal, Token, TrackedWallet, User
+from app.db.models import AlertDelivery, Signal, Token, TrackedWallet, User, WalletTx
 from app.services.subscriber_settings import AlertPrefs, parse_settings, with_updates
 from app.templates import (
     max_risk_label,
@@ -44,13 +46,18 @@ from app.templates import (
     unwatch_blocked_text,
     unwatch_done_text,
     unwatch_missing_text,
+    unwatch_unsubscribe_failed_text,
     wallets_text,
     watch_duplicate_text,
     watch_invalid_text,
     watch_saved_text,
+    watch_subscribe_failed_text,
     watch_usage_text,
+    watch_webhook_missing_text,
     welcome_text,
 )
+
+logger = structlog.get_logger(__name__)
 
 Clock = Callable[[], datetime]
 Sleep = Callable[[float], Awaitable[None]]
@@ -284,6 +291,30 @@ async def on_pref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _webhook_id(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    raw = context.bot_data.get("webhook_id")
+    if not isinstance(raw, str):
+        return None
+    cleaned = raw.strip()
+    return cleaned or None
+
+
+async def _add_webhook_address(context: ContextTypes.DEFAULT_TYPE, address: str) -> None:
+    webhook_id = _webhook_id(context)
+    helius = context.bot_data.get("helius")
+    if webhook_id is None or helius is None:
+        raise HeliusError("HELIUS_WEBHOOK_ID is not configured")
+    await helius.add_address_to_webhook(webhook_id, address)
+
+
+async def _remove_webhook_address(context: ContextTypes.DEFAULT_TYPE, address: str) -> None:
+    webhook_id = _webhook_id(context)
+    helius = context.bot_data.get("helius")
+    if webhook_id is None or helius is None:
+        raise HeliusError("HELIUS_WEBHOOK_ID is not configured")
+    await helius.remove_address_from_webhook(webhook_id, address)
+
+
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _owner_allowed(update, context):
         return
@@ -294,11 +325,14 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not args:
         await message.reply_text(watch_usage_text())
         return
-    label = " ".join(args[1:]).strip() or None
+    label = " ".join(args[1:]).strip()[:64] or None
     try:
         body = WalletCreate(address=args[0], label=label)
     except ValidationError:
         await message.reply_text(watch_invalid_text())
+        return
+    if _webhook_id(context) is None or context.bot_data.get("helius") is None:
+        await message.reply_text(watch_webhook_missing_text())
         return
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
     clock: Clock = context.bot_data["clock"]
@@ -312,8 +346,14 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         first_seen_at=clock(),
                     )
                 )
+                await session.flush()
+                await _add_webhook_address(context, body.address)
     except IntegrityError:
         await message.reply_text(watch_duplicate_text())
+        return
+    except HeliusError:
+        logger.warning("watch_subscribe_failed", address=body.address)
+        await message.reply_text(watch_subscribe_failed_text())
         return
     await message.reply_text(watch_saved_text(body.address, body.normalized_label()))
 
@@ -338,9 +378,25 @@ async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 if wallet is None:
                     await message.reply_text(unwatch_missing_text())
                     return
+                trades = await session.scalar(
+                    select(func.count())
+                    .select_from(WalletTx)
+                    .where(WalletTx.wallet_id == wallet.id)
+                )
+                if int(trades or 0) > 0:
+                    await message.reply_text(unwatch_blocked_text())
+                    return
+                if _webhook_id(context) is None or context.bot_data.get("helius") is None:
+                    await message.reply_text(watch_webhook_missing_text())
+                    return
+                await _remove_webhook_address(context, args[0])
                 await session.delete(wallet)
     except IntegrityError:
         await message.reply_text(unwatch_blocked_text())
+        return
+    except HeliusError:
+        logger.warning("unwatch_unsubscribe_failed", address=args[0])
+        await message.reply_text(unwatch_unsubscribe_failed_text())
         return
     await message.reply_text(unwatch_done_text(args[0]))
 

@@ -188,14 +188,31 @@ async def test_stranger_cannot_register(sessions: object) -> None:
     assert rows == []
 
 
+class _RecordingWebhooks:
+    def __init__(self) -> None:
+        self.added: list[tuple[str, str]] = []
+        self.removed: list[tuple[str, str]] = []
+
+    async def add_address_to_webhook(self, webhook_id: str, address: str) -> bool:
+        self.added.append((webhook_id, address))
+        return True
+
+    async def remove_address_from_webhook(self, webhook_id: str, address: str) -> bool:
+        self.removed.append((webhook_id, address))
+        return True
+
+
 async def test_watch_lists_and_removes_a_wallet(sessions: object) -> None:
     context = _context(sessions)
+    hooks = _RecordingWebhooks()
+    context.bot_data["helius"] = hooks
+    context.bot_data["webhook_id"] = "wh_test"
     address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     add = _command()
     context.args = [address, "desk"]
     await cmd_watch(add, context)
-    assert "Кошелёк записан" in add.message.reply_text.await_args.args[0]
-    assert "Helius" in add.message.reply_text.await_args.args[0]
+    assert "подписка на Helius активна" in add.message.reply_text.await_args.args[0]
+    assert hooks.added == [("wh_test", address)]
 
     listed = _command()
     await cmd_wallets(listed, context)
@@ -206,6 +223,7 @@ async def test_watch_lists_and_removes_a_wallet(sessions: object) -> None:
     context.args = [address]
     await cmd_unwatch(remove, context)
     assert address in remove.message.reply_text.await_args.args[0]
+    assert hooks.removed == [("wh_test", address)]
     async with sessions() as session:  # type: ignore[operator]
         left = await session.scalar(select(TrackedWallet).where(TrackedWallet.address == address))
     assert left is None

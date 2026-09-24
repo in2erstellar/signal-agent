@@ -54,6 +54,24 @@ class HeliusResponseError(HeliusError):
 
 
 @dataclass(frozen=True)
+class WebhookConfig:
+    """One Helius webhook. ``account_addresses`` is the monitored list.
+
+    PUT replaces the webhook configuration, so an address edit sends these
+    fields back. The shape is the 2026 Webhooks API:
+    https://www.helius.dev/docs/api-reference/webhooks/llms.txt
+    """
+
+    webhook_id: str
+    webhook_url: str
+    webhook_type: str
+    account_addresses: tuple[str, ...]
+    transaction_types: tuple[str, ...]
+    auth_header: str | None = None
+    txn_status: str | None = None
+
+
+@dataclass(frozen=True)
 class FundingInfo:
     """Earliest incoming SOL transfer into ``wallet_address``."""
 
@@ -108,6 +126,87 @@ class HeliusClient:
 
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
+
+    async def get_webhook(self, webhook_id: str) -> WebhookConfig:
+        """GET /v0/webhooks/{webhookID}?api-key= on the mainnet RPC host."""
+        response = await self._request(
+            "GET",
+            self._webhook_url(webhook_id),
+            params={"api-key": self._api_key},
+        )
+        if response.status_code != 200:
+            raise HeliusResponseError(
+                response.status_code,
+                f"get webhook failed with HTTP {response.status_code}",
+            )
+        return _parse_webhook(response.json())
+
+    async def add_address_to_webhook(self, webhook_id: str, address: str) -> bool:
+        """Append ``address`` to accountAddresses. Already present is a no-op."""
+        current = await self.get_webhook(webhook_id)
+        if address in current.account_addresses:
+            return True
+        updated = WebhookConfig(
+            webhook_id=current.webhook_id,
+            webhook_url=current.webhook_url,
+            webhook_type=current.webhook_type,
+            account_addresses=(*current.account_addresses, address),
+            transaction_types=current.transaction_types,
+            auth_header=current.auth_header,
+            txn_status=current.txn_status,
+        )
+        saved = await self._put_webhook(updated)
+        if address not in saved.account_addresses:
+            raise HeliusResponseError(200, "webhook update did not store the address")
+        return True
+
+    async def remove_address_from_webhook(self, webhook_id: str, address: str) -> bool:
+        """Drop ``address`` from accountAddresses. Already absent is a no-op."""
+        current = await self.get_webhook(webhook_id)
+        if address not in current.account_addresses:
+            return True
+        updated = WebhookConfig(
+            webhook_id=current.webhook_id,
+            webhook_url=current.webhook_url,
+            webhook_type=current.webhook_type,
+            account_addresses=tuple(
+                item for item in current.account_addresses if item != address
+            ),
+            transaction_types=current.transaction_types,
+            auth_header=current.auth_header,
+            txn_status=current.txn_status,
+        )
+        saved = await self._put_webhook(updated)
+        if address in saved.account_addresses:
+            raise HeliusResponseError(200, "webhook update did not remove the address")
+        return True
+
+    def _webhook_url(self, webhook_id: str) -> str:
+        return f"{self._rpc_url}/v0/webhooks/{webhook_id}"
+
+    async def _put_webhook(self, config: WebhookConfig) -> WebhookConfig:
+        body: dict[str, Any] = {
+            "webhookURL": config.webhook_url,
+            "webhookType": config.webhook_type,
+            "accountAddresses": list(config.account_addresses),
+            "transactionTypes": list(config.transaction_types),
+        }
+        if config.auth_header is not None:
+            body["authHeader"] = config.auth_header
+        if config.txn_status is not None:
+            body["txnStatus"] = config.txn_status
+        response = await self._request(
+            "PUT",
+            self._webhook_url(config.webhook_id),
+            params={"api-key": self._api_key},
+            json=body,
+        )
+        if response.status_code != 200:
+            raise HeliusResponseError(
+                response.status_code,
+                f"update webhook failed with HTTP {response.status_code}",
+            )
+        return _parse_webhook(response.json())
 
     async def get_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
         """Return the wallet's first incoming SOL transfer, or None if it never received SOL."""
@@ -231,6 +330,35 @@ class HeliusClient:
             last_status or 0,
             f"Helius {method} failed with HTTP {last_status}",
         )
+
+
+def _parse_webhook(payload: Any) -> WebhookConfig:
+    if not isinstance(payload, dict):
+        raise HeliusResponseError(200, "webhook payload is not an object")
+    webhook_id = payload.get("webhookID")
+    webhook_url = payload.get("webhookURL")
+    webhook_type = payload.get("webhookType")
+    if not isinstance(webhook_id, str) or not webhook_id:
+        raise HeliusResponseError(200, "webhook payload has no webhookID")
+    if not isinstance(webhook_url, str) or not webhook_url:
+        raise HeliusResponseError(200, "webhook payload has no webhookURL")
+    if not isinstance(webhook_type, str) or not webhook_type:
+        raise HeliusResponseError(200, "webhook payload has no webhookType")
+    addresses = payload.get("accountAddresses") or []
+    types = payload.get("transactionTypes") or []
+    if not isinstance(addresses, list) or not isinstance(types, list):
+        raise HeliusResponseError(200, "webhook address list is not an array")
+    auth = payload.get("authHeader")
+    status = payload.get("txnStatus")
+    return WebhookConfig(
+        webhook_id=webhook_id,
+        webhook_url=webhook_url,
+        webhook_type=webhook_type,
+        account_addresses=tuple(item for item in addresses if isinstance(item, str)),
+        transaction_types=tuple(item for item in types if isinstance(item, str)),
+        auth_header=auth if isinstance(auth, str) else None,
+        txn_status=status if isinstance(status, str) else None,
+    )
 
 
 def parse_holder_owners(
