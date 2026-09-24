@@ -28,6 +28,9 @@ def configure_logging(log_level: str) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+    # httpx logs the full URL. Telegram requests put the bot token in that URL.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     structlog.configure(
         processors=[
