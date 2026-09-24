@@ -1,30 +1,38 @@
 # SignalForge
 
-SignalForge — проект с зафиксированным стеком и жёсткими правилами разработки.
-Источник истины по правилам: [`AGENTS.md`](AGENTS.md).
+Сервис мониторинга и риск-анализа мемкоинов на Solana.
 
-## Как правила попадают в каждый промпт
+Источник истины по правилам: [`AGENTS.md`](AGENTS.md). Не ослабляй запреты. Секреты только через `.env` и pydantic Settings. Авто-исполнение сделок вне скоупа.
 
-Один и тот же канон продублирован в трёх местах, которые Cursor читает автоматически:
+## Как запустить локально
+
+1. Скопируй переменные: `cp .env.example .env`
+2. Подними Postgres, Redis и API: `docker-compose up --build`
+3. Проверь health: `curl localhost:8000/health`
+
+Ожидаемый ответ: `{"status":"ok","db":"connected","redis":"connected"}`.
+
+`docker-compose.yml` сам задаёт `DATABASE_URL` и `REDIS_URL` на сервисы `postgres` и `redis`. Файл `.env` для этого шага не редактируется.
+
+## Тесты
+
+```bash
+uv sync --group dev
+uv run pytest tests/test_health.py
+```
+
+`tests/test_health.py` использует явно помеченные mock-фикстуры драйверов. Живые Postgres и Redis проверяет `GET /health` у контейнера.
+
+## Правила в каждом промпте
 
 | Файл | Зачем |
 | --- | --- |
-| [`AGENTS.md`](AGENTS.md) | Канон. Cursor подмешивает его в контекст агента. |
-| [`.cursorrules`](.cursorrules) | Legacy always-on правила (как просили: AGENTS.md «как .cursorrules»). |
-| [`.cursor/rules/signalforge.mdc`](.cursor/rules/signalforge.mdc) | Современные Cursor Rules с `alwaysApply: true`. |
+| [`AGENTS.md`](AGENTS.md) | Канон. |
+| [`.cursorrules`](.cursorrules) | Legacy always-on правила. |
+| [`.cursor/rules/signalforge.mdc`](.cursor/rules/signalforge.mdc) | Cursor Rules с `alwaysApply: true`. |
 
-Если меняешь запрет, практику или стек — правь **все три файла одинаково**. Не ослабляй формулировки.
+Если меняешь запрет, практику или стек — правь все три файла одинаково.
 
-## Стек (не менять без согласования)
+## Стек
 
-- Python 3.11+
-- FastAPI
-- SQLAlchemy 2.0 (async) + Alembic
-- PostgreSQL 16 (+ TimescaleDB)
-- Redis Streams
-- python-telegram-bot v21+
-- httpx (async)
-- pytest + pytest-asyncio
-- Docker Compose
-
-Приватные ключи — только в зашифрованном виде. Секреты — только через `.env` и pydantic Settings. Авто-исполнение сделок на этом этапе вне скоупа.
+Python 3.11+, FastAPI, SQLAlchemy 2.0 (async) + Alembic, PostgreSQL 16, Redis 7, httpx, structlog, pytest + pytest-asyncio, Docker Compose. Зависимости закреплены в `pyproject.toml` и `uv.lock`.
