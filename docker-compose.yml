@@ -71,7 +71,7 @@ services:
       HELIUS_API_BASE_URL: https://api.helius.xyz
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
-      TELEGRAM_BOT_TOKEN: replace-me
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-replace-me}
       ANTHROPIC_API_KEY: replace-me
       TWITTER_BEARER_TOKEN: replace-me
       ENVIRONMENT: dev

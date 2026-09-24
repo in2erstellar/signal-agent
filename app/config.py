@@ -155,6 +155,25 @@ SIGNAL_WALLET_WEIGHT = Decimal("0.3")
 SIGNAL_BAIT_WEIGHT = Decimal("0.2")
 SIGNAL_THRESHOLD = Decimal("50")
 
+# Alert fan-out. min_score is a floor on composite_score.
+# max_risk is a ceiling on (100 - risk_score): a higher value admits more tokens.
+ALERT_DISPATCH_INTERVAL_SECONDS = 15
+ALERT_CHAT_INTERVAL_SECONDS = 1
+DEFAULT_MIN_SCORE = Decimal("50")
+DEFAULT_MAX_RISK = Decimal("100")
+MIN_SCORE_CHOICES = (
+    Decimal("50"),
+    Decimal("60"),
+    Decimal("70"),
+    Decimal("80"),
+)
+MAX_RISK_CHOICES = (
+    Decimal("20"),
+    Decimal("40"),
+    Decimal("60"),
+    Decimal("100"),
+)
+
 if sum(RISK_CHECK_WEIGHTS.values()) != 100:
     raise RuntimeError("RISK_CHECK_WEIGHTS must sum to 100")
 

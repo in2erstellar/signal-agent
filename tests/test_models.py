@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models import (
+    AlertDelivery,
     BaitFlag,
     FunderCluster,
     Signal,
@@ -138,6 +139,14 @@ async def test_each_table_accepts_a_row_and_foreign_keys_resolve(
     bait_flag = make_bait_flag(wallet_id=wallet.id, token_id=token.id)
     signal = make_signal(token_id=token.id)
     session.add_all([wallet_tx, funder, cluster, bait_flag, signal])
+    await session.flush()
+    session.add(
+        AlertDelivery(
+            user_id=user.id,
+            signal_id=signal.id,
+            sent_at=signal.triggered_at,
+        )
+    )
     await session.flush()
 
     await session.refresh(

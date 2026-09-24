@@ -75,8 +75,9 @@ async def truncate_pipeline(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:
         await connection.execute(
             text(
-                "TRUNCATE TABLE signals, bait_flags, wallet_txs, funder_clusters, "
-                "wallet_funders, tokens, tracked_wallets RESTART IDENTITY CASCADE"
+                "TRUNCATE TABLE alert_deliveries, signals, bait_flags, wallet_txs, "
+                "funder_clusters, wallet_funders, tokens, tracked_wallets, users "
+                "RESTART IDENTITY CASCADE"
             )
         )
 

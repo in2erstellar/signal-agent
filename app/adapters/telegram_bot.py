@@ -1,0 +1,258 @@
+"""Telegram bot commands and the per-chat send limiter.
+
+The token comes from Settings. This module does not embed it.
+Polling is started by the worker process, not by import.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+
+from app.config import (
+    ALERT_CHAT_INTERVAL_SECONDS,
+    DEFAULT_MAX_RISK,
+    DEFAULT_MIN_SCORE,
+    MAX_RISK_CHOICES,
+    MIN_SCORE_CHOICES,
+)
+from app.db.models import AlertDelivery, User
+from app.services.subscriber_settings import parse_settings, with_updates
+from app.templates import (
+    max_risk_label,
+    min_score_label,
+    settings_text,
+    status_text,
+    unregistered_text,
+    welcome_text,
+)
+
+Clock = Callable[[], datetime]
+Sleep = Callable[[float], Awaitable[None]]
+Monotonic = Callable[[], float]
+
+
+class PerChatRateLimiter:
+    """At most one outgoing message per chat per interval.
+
+    Each chat has its own lock, which is a semaphore of one, and a
+    next-allowed timestamp. ``wait`` sleeps until that timestamp and then
+    reserves the next interval.
+    """
+
+    def __init__(
+        self,
+        *,
+        interval_seconds: float = ALERT_CHAT_INTERVAL_SECONDS,
+        sleep: Sleep | None = None,
+        clock: Monotonic | None = None,
+    ) -> None:
+        self._interval = interval_seconds
+        self._sleep = sleep or asyncio.sleep
+        self._clock = clock or time.monotonic
+        self._locks: dict[int, asyncio.Lock] = {}
+        self._next_at: dict[int, float] = {}
+
+    async def wait(self, chat_id: int) -> None:
+        lock = self._locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            now = self._clock()
+            ready_at = self._next_at.get(chat_id, now)
+            delay = ready_at - now
+            if delay > 0:
+                await self._sleep(delay)
+                now = self._clock()
+            self._next_at[chat_id] = now + self._interval
+
+
+class TelegramAlertSender:
+    """Send one HTML alert through the bot, after the per-chat limiter."""
+
+    def __init__(self, bot: object, limiter: PerChatRateLimiter | None = None) -> None:
+        self._bot = bot
+        self._limiter = limiter or PerChatRateLimiter()
+
+    async def send(self, chat_id: int, text: str) -> None:
+        await self._limiter.wait(chat_id)
+        await self._bot.send_message(  # type: ignore[attr-defined]
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+
+
+def telegram_configured(token: str) -> bool:
+    cleaned = token.strip()
+    return bool(cleaned) and cleaned != "replace-me"
+
+
+def build_application(
+    token: str,
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    clock: Clock | None = None,
+) -> Application:
+    application = Application.builder().token(token).build()
+    application.bot_data["sessions"] = sessions
+    application.bot_data["clock"] = clock or (lambda: datetime.now(timezone.utc))
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("settings", cmd_settings))
+    application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CallbackQueryHandler(on_pref, pattern=r"^pref:"))
+    return application
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    message = update.message
+    if user is None or message is None:
+        return
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    clock: Clock = context.bot_data["clock"]
+    async with sessions() as session:
+        async with session.begin():
+            await _register(session, user.id, clock())
+    await message.reply_text(welcome_text())
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    message = update.message
+    if user is None or message is None:
+        return
+    prefs = await _prefs_for(context, user.id)
+    if prefs is None:
+        await message.reply_text(unregistered_text())
+        return
+    await message.reply_text(
+        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
+        reply_markup=_markup(prefs.min_score, prefs.max_risk),
+    )
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    message = update.message
+    if user is None or message is None:
+        return
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    clock: Clock = context.bot_data["clock"]
+    async with sessions() as session:
+        row = await session.scalar(select(User).where(User.telegram_id == user.id))
+        if row is None:
+            await message.reply_text(unregistered_text())
+            return
+        prefs = parse_settings(row.settings)
+        since = clock() - timedelta(hours=24)
+        alerts_24h = await session.scalar(
+            select(func.count())
+            .select_from(AlertDelivery)
+            .where(
+                AlertDelivery.user_id == row.id,
+                AlertDelivery.sent_at >= since,
+            )
+        )
+    await message.reply_text(
+        status_text(
+            min_score=prefs.min_score,
+            max_risk=prefs.max_risk,
+            active=prefs.active,
+            alerts_24h=int(alerts_24h or 0),
+        )
+    )
+
+
+async def on_pref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None or not query.data:
+        return
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        return
+    _, kind, raw = parts
+    value = _allowed(kind, raw)
+    if value is None:
+        return
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    prefs = None
+    async with sessions() as session:
+        async with session.begin():
+            row = await session.scalar(select(User).where(User.telegram_id == user.id))
+            if row is not None:
+                row.settings = with_updates(row.settings, **{kind: value})
+                prefs = parse_settings(row.settings)
+    if prefs is None:
+        await query.edit_message_text(unregistered_text())
+        return
+    await query.edit_message_text(
+        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
+        reply_markup=_markup(prefs.min_score, prefs.max_risk),
+    )
+
+
+async def _register(session: AsyncSession, telegram_id: int, now: datetime) -> None:
+    row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+    if row is None:
+        session.add(
+            User(
+                telegram_id=telegram_id,
+                settings=with_updates(
+                    {},
+                    min_score=DEFAULT_MIN_SCORE,
+                    max_risk=DEFAULT_MAX_RISK,
+                    active=True,
+                ),
+                created_at=now,
+            )
+        )
+        return
+    row.settings = with_updates(row.settings, active=True)
+
+
+async def _prefs_for(context: ContextTypes.DEFAULT_TYPE, telegram_id: int):
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+        if row is None:
+            return None
+        return parse_settings(row.settings)
+
+
+def _markup(min_score: Decimal, max_risk: Decimal) -> InlineKeyboardMarkup:
+    min_row = [
+        InlineKeyboardButton(
+            min_score_label(value, selected=value == min_score),
+            callback_data=f"pref:min_score:{value}",
+        )
+        for value in MIN_SCORE_CHOICES
+    ]
+    max_row = [
+        InlineKeyboardButton(
+            max_risk_label(value, selected=value == max_risk),
+            callback_data=f"pref:max_risk:{value}",
+        )
+        for value in MAX_RISK_CHOICES
+    ]
+    return InlineKeyboardMarkup([min_row, max_row])
+
+
+def _allowed(kind: str, raw: str) -> Decimal | None:
+    try:
+        value = Decimal(raw)
+    except Exception:
+        return None
+    choices = MIN_SCORE_CHOICES if kind == "min_score" else MAX_RISK_CHOICES
+    if kind not in {"min_score", "max_risk"} or value not in choices:
+        return None
+    return value

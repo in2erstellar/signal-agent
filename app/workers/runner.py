@@ -15,11 +15,13 @@ from datetime import datetime, timezone
 import structlog
 
 from app.config import (
+    ALERT_DISPATCH_INTERVAL_SECONDS,
     BAIT_POLL_INTERVAL_SECONDS,
     SIGNAL_FUSION_INTERVAL_SECONDS,
     get_settings,
 )
 from app.db.base import create_engine, create_sessionmaker
+from app.workers.alert_dispatcher import AlertDispatcher
 from app.workers.bait_check_worker import BaitCheckWorker, detector_for_session
 from app.workers.risk_scan_worker import PrebuiltClusters, RiskScanWorker
 from app.workers.signal_fusion import SignalFusion
@@ -106,6 +108,36 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         while not stop.is_set():
             await risk.run_once(block_ms=5000)
 
+    async def alerts_loop() -> None:
+        from app.adapters.telegram_bot import (
+            PerChatRateLimiter,
+            TelegramAlertSender,
+            build_application,
+            telegram_configured,
+        )
+
+        token = settings.telegram_bot_token.get_secret_value()
+        if not telegram_configured(token):
+            logger.info("telegram_disabled")
+            await stop.wait()
+            return
+        application = build_application(token, sessions)
+        dispatcher = AlertDispatcher(
+            sessions,
+            TelegramAlertSender(application.bot, PerChatRateLimiter()),
+            stop=stop,
+        )
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=True)
+        logger.info("telegram_polling_started")
+        try:
+            await poll_loop(stop, dispatcher.run_once, ALERT_DISPATCH_INTERVAL_SECONDS)
+        finally:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+
     logger.info("workers_started")
     try:
         await run_until_stopped(
@@ -113,6 +145,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             risk_loop,
             lambda: poll_loop(stop, bait.run_once, BAIT_POLL_INTERVAL_SECONDS),
             lambda: poll_loop(stop, fusion.run_once, SIGNAL_FUSION_INTERVAL_SECONDS),
+            alerts_loop,
         )
     finally:
         await helius.aclose()
