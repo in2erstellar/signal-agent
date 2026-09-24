@@ -52,7 +52,6 @@ class _Snapshot:
     risk_flags: list[str]
     bait_warning: bool
     trace_id: str | None
-    channel_notified: bool
     recipients: list[_Recipient]
 
 
@@ -70,15 +69,18 @@ class AlertDispatcher:
         *,
         clock: Clock | None = None,
         stop: object | None = None,
-        channel_id: int | str | None = None,
+        owners: frozenset[int] | None = None,
     ) -> None:
         self._sessions = sessions
         self._sender = sender
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._stop = stop
-        self._channel_id = channel_id
+        self._owners = owners
 
     async def run_once(self) -> tuple[int, int, int]:
+        if self._owners is not None and not self._owners:
+            logger.info("alert_dispatch_skipped", reason="no_owners")
+            return 0, 0, 0
         processed = 0
         failed = 0
         sent = 0
@@ -156,62 +158,13 @@ class AlertDispatcher:
                     telegram_id=recipient.telegram_id,
                     signal_id=str(signal_id),
                 )
-            posted, channel_done = await self._post_channel(
-                signal_id,
-                text,
-                already_posted=snapshot.channel_notified,
-            )
-            sent += posted
-            if not channel_done:
-                failed += 1
         await self._persist(
             signal_id,
             delivered,
             deactivated,
             mark_notified=failed == 0,
-            channel_notified=channel_done,
         )
         return _Outcome(sent, failed)
-
-    async def _post_channel(
-        self,
-        signal_id: UUID,
-        text: str,
-        *,
-        already_posted: bool,
-    ) -> tuple[int, bool]:
-        """Return messages sent and whether the channel obligation is finished.
-
-        No configured channel counts as finished. A Forbidden response is also
-        finished: retrying a channel the bot cannot post to would hold every
-        direct-message retry open. A transport error stays unfinished.
-        """
-        if self._channel_id is None or already_posted:
-            return 0, True
-        try:
-            await self._sender.send(self._channel_id, text)
-        except Forbidden:
-            logger.warning(
-                "channel_post_forbidden",
-                channel_id=str(self._channel_id),
-                signal_id=str(signal_id),
-            )
-            return 0, True
-        except TelegramError as exc:
-            logger.warning(
-                "channel_post_failed",
-                channel_id=str(self._channel_id),
-                error=type(exc).__name__,
-                signal_id=str(signal_id),
-            )
-            return 0, False
-        record_alert_sent()
-        logger.info(
-            "channel_post_sent",
-            channel_id=str(self._channel_id),
-            signal_id=str(signal_id),
-        )
-        return 1, True
 
     async def _load(self, signal_id: UUID) -> _Snapshot | None:
         async with self._sessions() as session:
@@ -237,6 +190,8 @@ class AlertDispatcher:
                 if user.id in delivered:
                     continue
                 prefs = parse_settings(user.settings)
+                if self._owners is not None and user.telegram_id not in self._owners:
+                    continue
                 if not accepts_alert(
                     prefs,
                     composite_score=signal.composite_score,
@@ -254,7 +209,6 @@ class AlertDispatcher:
                 risk_flags=[str(flag) for flag in flags],
                 bait_warning=bool(bait_count),
                 trace_id=signal.trace_id,
-                channel_notified=signal.channel_notified,
                 recipients=recipients,
             )
 
@@ -265,7 +219,6 @@ class AlertDispatcher:
         deactivated: list[UUID],
         *,
         mark_notified: bool,
-        channel_notified: bool,
     ) -> None:
         now = self._clock()
         async with self._sessions() as session:
@@ -284,14 +237,9 @@ class AlertDispatcher:
                     )
                     for row in rows:
                         row.settings = with_updates(row.settings, active=False)
-                values: dict[str, bool] = {}
-                if channel_notified:
-                    values["channel_notified"] = True
                 if mark_notified:
-                    values["notified"] = True
-                if values:
                     await session.execute(
-                        update(Signal).where(Signal.id == signal_id).values(**values)
+                        update(Signal).where(Signal.id == signal_id).values(notified=True)
                     )
 
 

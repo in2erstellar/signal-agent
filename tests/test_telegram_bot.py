@@ -10,10 +10,21 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.adapters.telegram_bot import cmd_settings, cmd_start, cmd_status, on_pref
-from app.db.models import AlertDelivery, User
+from app.adapters.telegram_bot import (
+    cmd_risk,
+    cmd_settings,
+    cmd_signals,
+    cmd_start,
+    cmd_status,
+    cmd_unwatch,
+    cmd_wallets,
+    cmd_watch,
+    on_pref,
+    owner_ids,
+)
+from app.db.models import AlertDelivery, Token, TrackedWallet, User
 from app.services.subscriber_settings import parse_settings
-from app.templates import BAIT_WARNING, DISCLAIMER, alert_text, welcome_text
+from app.templates import BAIT_WARNING, DISCLAIMER, alert_text, private_denied_text, welcome_text
 from tests.factories import make_signal, make_token, make_user
 from tests.pipeline_containers import truncate_pipeline
 
@@ -33,9 +44,14 @@ async def sessions(pipeline_infra: object):
     await engine.dispose()
 
 
-def _context(sessions: object) -> MagicMock:
+def _context(sessions: object, owners: frozenset[int] | None = None) -> MagicMock:
     context = MagicMock()
-    context.bot_data = {"sessions": sessions, "clock": lambda: T0}
+    context.args = []
+    context.bot_data = {
+        "sessions": sessions,
+        "clock": lambda: T0,
+        "owners": frozenset({TELEGRAM_ID}) if owners is None else owners,
+    }
     return context
 
 
@@ -154,6 +170,92 @@ async def test_status_without_start_asks_to_register(sessions: object) -> None:
     update = _command()
     await cmd_status(update, _context(sessions))
     assert update.message.reply_text.await_args.args[0].startswith("Сначала отправьте /start")
+
+
+def test_owner_ids_parse_a_list_and_reject_junk() -> None:
+    assert owner_ids("") == frozenset()
+    assert owner_ids(" 424242, 7 ") == frozenset({424242, 7})
+    with pytest.raises(ValueError):
+        owner_ids("424242, me")
+
+
+async def test_stranger_cannot_register(sessions: object) -> None:
+    update = _command(999)
+    await cmd_start(update, _context(sessions))
+    assert update.message.reply_text.await_args.args[0] == private_denied_text()
+    async with sessions() as session:  # type: ignore[operator]
+        rows = list(await session.scalars(select(User)))
+    assert rows == []
+
+
+async def test_watch_lists_and_removes_a_wallet(sessions: object) -> None:
+    context = _context(sessions)
+    address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    add = _command()
+    context.args = [address, "desk"]
+    await cmd_watch(add, context)
+    assert "Кошелёк записан" in add.message.reply_text.await_args.args[0]
+    assert "Helius" in add.message.reply_text.await_args.args[0]
+
+    listed = _command()
+    await cmd_wallets(listed, context)
+    assert address in listed.message.reply_text.await_args.args[0]
+    assert "desk" in listed.message.reply_text.await_args.args[0]
+
+    remove = _command()
+    context.args = [address]
+    await cmd_unwatch(remove, context)
+    assert address in remove.message.reply_text.await_args.args[0]
+    async with sessions() as session:  # type: ignore[operator]
+        left = await session.scalar(select(TrackedWallet).where(TrackedWallet.address == address))
+    assert left is None
+
+
+async def test_watch_rejects_a_bad_address(sessions: object) -> None:
+    context = _context(sessions)
+    update = _command()
+    context.args = ["not-an-address"]
+    await cmd_watch(update, context)
+    assert "base58" in update.message.reply_text.await_args.args[0]
+
+
+async def test_signals_and_stored_risk_are_readable(sessions: object) -> None:
+    mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    async with sessions() as session:  # type: ignore[operator]
+        async with session.begin():
+            token = make_token(
+                mint=mint,
+                symbol="BONK",
+                risk_score=Decimal("80"),
+                risk_flags=["check_lp_lock"],
+            )
+            session.add(token)
+            await session.flush()
+            session.add(
+                make_signal(
+                    token_id=token.id,
+                    composite_score=Decimal("61"),
+                    risk_score=Decimal("80"),
+                    triggered_at=T0,
+                )
+            )
+    context = _context(sessions)
+    signals = _command()
+    await cmd_signals(signals, context)
+    text = signals.message.reply_text.await_args.args[0]
+    assert "BONK" in text
+    assert "61" in text
+
+    risk = _command()
+    context.args = [mint]
+    await cmd_risk(risk, context)
+    body = risk.message.reply_text.await_args.args[0]
+    assert "risk_score: 80" in body
+    assert "check_lp_lock" in body
+    assert "не значит, что токен безопасен" in body
+    async with sessions() as session:  # type: ignore[operator]
+        stored = await session.scalar(select(Token).where(Token.mint == mint))
+    assert stored is not None
 
 
 async def test_alert_text_shows_the_score_the_mint_link_and_the_bait_warning() -> None:

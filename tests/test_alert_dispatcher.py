@@ -120,10 +120,13 @@ async def test_dispatcher_sends_only_to_users_inside_both_filters(sessions: obje
     assert len(sender.sent) == 1
 
 
-async def test_channel_receives_the_same_alert_once(sessions: object) -> None:
+async def test_owner_filter_skips_other_telegram_accounts(sessions: object) -> None:
     await _seed(
         sessions,
-        users=[(401, {"min_score": "50", "max_risk": "100", "active": True})],
+        users=[
+            (401, {"min_score": "50", "max_risk": "100", "active": True}),
+            (402, {"min_score": "50", "max_risk": "100", "active": True}),
+        ],
         bait=False,
     )
     sender = RecordingSender()
@@ -131,50 +134,11 @@ async def test_channel_receives_the_same_alert_once(sessions: object) -> None:
         sessions,  # type: ignore[arg-type]
         sender,
         clock=lambda: T0,
-        channel_id=-100123,
+        owners=frozenset({401}),
     )
     processed, failed, sent = await dispatcher.run_once()
-    assert (processed, failed, sent) == (1, 0, 2)
-    assert [chat for chat, _ in sender.sent] == [401, -100123]
-    assert sender.sent[0][1] == sender.sent[1][1]
-
-    async with sessions() as session:  # type: ignore[operator]
-        signal = await session.scalar(select(Signal))
-    assert signal is not None
-    assert signal.notified is True
-    assert signal.channel_notified is True
-
-    await dispatcher.run_once()
-    assert len(sender.sent) == 2
-
-
-async def test_channel_transport_error_is_retried_without_a_second_direct_message(
-    sessions: object,
-) -> None:
-    await _seed(
-        sessions,
-        users=[(501, {"min_score": "50", "max_risk": "100", "active": True})],
-        bait=False,
-    )
-    sender = RecordingSender(fail_once={-100501})
-    dispatcher = AlertDispatcher(
-        sessions,  # type: ignore[arg-type]
-        sender,
-        clock=lambda: T0,
-        channel_id=-100501,
-    )
-    first = await dispatcher.run_once()
-    assert first == (1, 1, 1)
-    assert [chat for chat, _ in sender.sent] == [501]
-    async with sessions() as session:  # type: ignore[operator]
-        signal = await session.scalar(select(Signal))
-    assert signal is not None
-    assert signal.notified is False
-    assert signal.channel_notified is False
-
-    second = await dispatcher.run_once()
-    assert second == (1, 0, 1)
-    assert [chat for chat, _ in sender.sent] == [501, -100501]
+    assert (processed, failed, sent) == (1, 0, 1)
+    assert [chat for chat, _ in sender.sent] == [401]
 
 
 async def test_blocked_user_is_deactivated_and_not_retried(sessions: object) -> None:

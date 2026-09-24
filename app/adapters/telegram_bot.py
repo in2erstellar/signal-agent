@@ -13,11 +13,15 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Protocol
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
+from app.api.schemas import WalletCreate
+from app.api.token_risk import report_from_token
 from app.config import (
     ALERT_CHAT_INTERVAL_SECONDS,
     DEFAULT_MAX_RISK,
@@ -25,14 +29,26 @@ from app.config import (
     MAX_RISK_CHOICES,
     MIN_SCORE_CHOICES,
 )
-from app.db.models import AlertDelivery, User
+from app.db.models import AlertDelivery, Signal, Token, TrackedWallet, User
 from app.services.subscriber_settings import AlertPrefs, parse_settings, with_updates
 from app.templates import (
     max_risk_label,
     min_score_label,
+    private_denied_text,
+    risk_missing_text,
+    risk_text,
     settings_text,
+    signals_text,
     status_text,
     unregistered_text,
+    unwatch_blocked_text,
+    unwatch_done_text,
+    unwatch_missing_text,
+    wallets_text,
+    watch_duplicate_text,
+    watch_invalid_text,
+    watch_saved_text,
+    watch_usage_text,
     welcome_text,
 )
 
@@ -112,27 +128,20 @@ def telegram_configured(token: str) -> bool:
     return bool(cleaned) and cleaned != "replace-me"
 
 
-def channel_target(raw: str) -> int | str | None:
-    """Chat id or @username for the public channel. Empty disables channel posts."""
-    cleaned = raw.strip()
-    if not cleaned or cleaned == "replace-me":
-        return None
-    if cleaned.lstrip("-").isdigit() and cleaned not in ("-", ""):
-        return int(cleaned)
-    name = cleaned[1:] if cleaned.startswith("@") else cleaned
-    if not name.replace("_", "").isalnum():
-        return None
-    return f"@{name}"
-
-
-def bot_public_url(username: str) -> str | None:
-    """t.me link for the page. The bot token never appears here."""
-    name = username.strip().lstrip("@")
-    if not name or name == "replace-me":
-        return None
-    if not name.replace("_", "").isalnum():
-        return None
-    return f"https://t.me/{name}"
+def owner_ids(raw: str) -> frozenset[int]:
+    """Numeric Telegram ids allowed to use the private bot. Empty means nobody."""
+    text = raw.strip()
+    if not text:
+        return frozenset()
+    found: list[int] = []
+    for part in text.split(","):
+        piece = part.strip()
+        if not piece.isdigit():
+            raise ValueError(
+                "TELEGRAM_OWNER_IDS must be a comma-separated list of numeric Telegram ids"
+            )
+        found.append(int(piece))
+    return frozenset(found)
 
 
 def build_application(
@@ -140,18 +149,46 @@ def build_application(
     sessions: async_sessionmaker[AsyncSession],
     *,
     clock: Clock | None = None,
+    owners: frozenset[int] | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
     application = Application.builder().token(token).build()
     application.bot_data["sessions"] = sessions
     application.bot_data["clock"] = clock or (lambda: datetime.now(timezone.utc))
+    application.bot_data["owners"] = owners if owners is not None else frozenset()
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("settings", cmd_settings))
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("watch", cmd_watch))
+    application.add_handler(CommandHandler("unwatch", cmd_unwatch))
+    application.add_handler(CommandHandler("wallets", cmd_wallets))
+    application.add_handler(CommandHandler("signals", cmd_signals))
+    application.add_handler(CommandHandler("risk", cmd_risk))
     application.add_handler(CallbackQueryHandler(on_pref, pattern=r"^pref:"))
     return application
 
 
+def _owners(context: ContextTypes.DEFAULT_TYPE) -> frozenset[int]:
+    raw = context.bot_data.get("owners")
+    if isinstance(raw, frozenset):
+        return raw
+    return frozenset()
+
+
+async def _owner_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    if user is not None and user.id in _owners(context):
+        return True
+    if update.message is not None:
+        await update.message.reply_text(private_denied_text())
+    elif update.callback_query is not None:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(private_denied_text())
+    return False
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _owner_allowed(update, context):
+        return
     user = update.effective_user
     message = update.message
     if user is None or message is None:
@@ -165,6 +202,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _owner_allowed(update, context):
+        return
     user = update.effective_user
     message = update.message
     if user is None or message is None:
@@ -180,6 +219,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _owner_allowed(update, context):
+        return
     user = update.effective_user
     message = update.message
     if user is None or message is None:
@@ -216,6 +257,8 @@ async def on_pref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if query is None or user is None or not query.data:
         return
+    if not await _owner_allowed(update, context):
+        return
     await query.answer()
     parts = query.data.split(":")
     if len(parts) != 3:
@@ -239,6 +282,132 @@ async def on_pref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
         reply_markup=_markup(prefs.min_score, prefs.max_risk),
     )
+
+
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _owner_allowed(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    args = [str(part) for part in (context.args or [])]
+    if not args:
+        await message.reply_text(watch_usage_text())
+        return
+    label = " ".join(args[1:]).strip() or None
+    try:
+        body = WalletCreate(address=args[0], label=label)
+    except ValidationError:
+        await message.reply_text(watch_invalid_text())
+        return
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    clock: Clock = context.bot_data["clock"]
+    try:
+        async with sessions() as session:
+            async with session.begin():
+                session.add(
+                    TrackedWallet(
+                        address=body.address,
+                        label=body.normalized_label(),
+                        first_seen_at=clock(),
+                    )
+                )
+    except IntegrityError:
+        await message.reply_text(watch_duplicate_text())
+        return
+    await message.reply_text(watch_saved_text(body.address, body.normalized_label()))
+
+
+async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _owner_allowed(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    args = [str(part) for part in (context.args or [])]
+    if not args:
+        await message.reply_text("Формат: /unwatch адрес")
+        return
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    try:
+        async with sessions() as session:
+            async with session.begin():
+                wallet = await session.scalar(
+                    select(TrackedWallet).where(TrackedWallet.address == args[0])
+                )
+                if wallet is None:
+                    await message.reply_text(unwatch_missing_text())
+                    return
+                await session.delete(wallet)
+    except IntegrityError:
+        await message.reply_text(unwatch_blocked_text())
+        return
+    await message.reply_text(unwatch_done_text(args[0]))
+
+
+async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _owner_allowed(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        rows = list(
+            await session.scalars(
+                select(TrackedWallet).order_by(TrackedWallet.first_seen_at.desc()).limit(15)
+            )
+        )
+    lines = [f"{row.address}" + (f" — {row.label}" if row.label else "") for row in rows]
+    await message.reply_text(wallets_text(lines))
+
+
+async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _owner_allowed(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        rows = (
+            await session.execute(
+                select(Signal, Token)
+                .join(Token, Signal.token_id == Token.id)
+                .order_by(Signal.triggered_at.desc(), Signal.id.desc())
+                .limit(8)
+            )
+        ).all()
+    lines = [
+        f"{token.symbol or token.mint[:4]} composite {signal.composite_score} risk {signal.risk_score}"
+        for signal, token in rows
+    ]
+    await message.reply_text(signals_text(lines))
+
+
+async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _owner_allowed(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    args = [str(part) for part in (context.args or [])]
+    if not args:
+        await message.reply_text("Формат: /risk mint")
+        return
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        token = await session.scalar(select(Token).where(Token.mint == args[0]))
+    if token is None or token.risk_score is None:
+        await message.reply_text(risk_missing_text())
+        return
+    try:
+        report = report_from_token(token)
+    except ValueError:
+        await message.reply_text(risk_missing_text())
+        return
+    flags = [check.name for check in report.checks if check.passed is False]
+    await message.reply_text(risk_text(mint=report.mint, risk_score=report.risk_score, flags=flags))
 
 
 async def _register(session: AsyncSession, telegram_id: int, now: datetime) -> None:

@@ -113,7 +113,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             PerChatRateLimiter,
             TelegramAlertSender,
             build_application,
-            channel_target,
+            owner_ids,
             telegram_configured,
         )
 
@@ -122,12 +122,13 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             logger.info("telegram_disabled")
             await stop.wait()
             return
-        application = build_application(token, sessions)
+        owners = owner_ids(settings.telegram_owner_ids)
+        application = build_application(token, sessions, owners=owners)
         dispatcher = AlertDispatcher(
             sessions,
             TelegramAlertSender(application.bot, PerChatRateLimiter()),
             stop=stop,
-            channel_id=channel_target(settings.telegram_channel_id),
+            owners=owners,
         )
         await application.initialize()
         await application.start()

@@ -13,15 +13,25 @@ BAIT_WARNING = "⚠️ Обнаружен паттерн copy-trade baiting"
 
 def welcome_text() -> str:
     return (
-        "SignalForge следит за покупками отслеживаемых кошельков на Solana "
-        "и присылает сигнал, когда композитный балл токена проходит ваш порог.\n"
+        "SignalForge — приватный бот. Он следит за покупками кошельков, "
+        "которые вы сами добавили, и пишет в этот чат, когда балл проходит порог.\n"
         "\n"
-        "/settings — порог composite score и фильтр риска\n"
-        "/status — текущие настройки и сколько алертов пришло за 24 часа\n"
+        "/watch адрес — добавить кошелёк\n"
+        "/wallets — список\n"
+        "/unwatch адрес — убрать кошелёк без сделок\n"
+        "/signals — последние сигналы\n"
+        "/risk mint — сохранённый скан\n"
+        "/settings — порог\n"
+        "/status — настройки и алерты за 24 часа\n"
         "\n"
-        "Бот ничего не покупает и не продаёт.\n"
+        "Бот ничего не покупает и не продаёт. "
+        "Адрес из /watch попадает в базу; подписку Helius на этот адрес нужно включить отдельно.\n"
         f"{DISCLAIMER}"
     )
+
+
+def private_denied_text() -> str:
+    return "Этот бот закрыт. Ваш Telegram id нет в TELEGRAM_OWNER_IDS."
 
 
 def unregistered_text() -> str:
@@ -109,120 +119,63 @@ def _format_score(value: Decimal) -> str:
     return text
 
 
-def channel_page(*, bot_url: str | None) -> str:
-    """Public page linked from the Telegram channel. No live market data."""
-    if bot_url:
-        personal = (
-            "<p>Свой порог, если общая лента слишком широкая:</p>"
-            f'<a class="button" href="{escape(bot_url, quote=True)}">Открыть бота</a>'
-            "<p>В боте задаются min_score и max_risk. Канал продолжает публиковать общую ленту.</p>"
-        )
-    else:
-        personal = (
-            "<p>Свой порог настраивается в боте командой /settings. "
-            "Ссылка появится здесь, когда задан TELEGRAM_BOT_USERNAME.</p>"
-        )
-    return f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SignalForge — лента сигналов</title>
-  <style>
-    :root {{
-      color-scheme: light;
-      --ink: #1c1915;
-      --muted: #5c564c;
-      --paper: #f4f0e6;
-      --card: #fffdf8;
-      --line: #e3d9c8;
-      --accent: #9a3412;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
-      background: var(--paper);
-      color: var(--ink);
-      line-height: 1.45;
-    }}
-    main {{
-      max-width: 40rem;
-      margin: 0 auto;
-      padding: 2.5rem 1.25rem 4rem;
-    }}
-    h1 {{
-      font-size: 2.4rem;
-      line-height: 1;
-      margin: 0 0 0.75rem;
-      letter-spacing: -0.03em;
-    }}
-    h2 {{
-      font-size: 1.25rem;
-      margin: 2.25rem 0 0.6rem;
-    }}
-    p, li {{ font-size: 1.05rem; }}
-    .lede {{ font-size: 1.2rem; margin-top: 0; }}
-    .muted {{ color: var(--muted); }}
-    .bubble {{
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 1rem 1rem 1rem 0.25rem;
-      padding: 1rem 1.1rem;
-      margin: 1rem 0;
-    }}
-    .bubble strong {{ font-family: ui-sans-serif, system-ui, sans-serif; }}
-    .score {{
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 1.8rem;
-      margin: 0.4rem 0;
-    }}
-    .note {{
-      border-left: 3px solid var(--accent);
-      padding-left: 0.9rem;
-      color: var(--accent);
-    }}
-    a {{ color: var(--accent); }}
-    .button {{
-      display: inline-block;
-      margin: 0.5rem 0 0.25rem;
-      padding: 0.7rem 1rem;
-      background: var(--ink);
-      color: var(--paper);
-      text-decoration: none;
-      border-radius: 999px;
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 0.95rem;
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <p class="muted">SignalForge</p>
-    <h1>Сигнал в канал, когда покупка проходит порог.</h1>
-    <p class="lede">Бот смотрит покупки отслеживаемых кошельков на Solana, считает известные ончейн-проверки и публикует одну запись в канал. Отдельно в личку можно получать ту же ленту со своим порогом.</p>
+def watch_usage_text() -> str:
+    return "Формат: /watch адрес [метка]"
 
-    <h2>Что увидит подписчик канала</h2>
-    <p>Один пост на токен. Ниже пример того, как выглядит сообщение. Это иллюстрация, не текущий рынок.</p>
-    <div class="bubble">
-      <strong>BONK</strong><br>
-      <span class="muted">mint на Solscan</span>
-      <p class="score">72.5</p>
-      <div>risk_score: 85</div>
-      <div>risk_flags: check_funder_cluster_exposure</div>
-      <p><strong>{escape(BAIT_WARNING)}</strong></p>
-      <div>{escape(DISCLAIMER)}</div>
-    </div>
-    <p><strong>72.5</strong> — composite score. Пост создаётся, только если он строго выше 50. <strong>risk_score</strong> — сколько известных проверок прошло: 100 значит, что они прошли, и не значит, что токен безопасен. Флаги — какие проверки не прошли. Строка про bait появляется, если к моменту отправки уже есть такой флаг.</p>
 
-    <h2>Как подписаться</h2>
-    <p>Подписка на канал уже достаточна. Общая лента приходит туда сама, без команд.</p>
-    {personal}
+def watch_invalid_text() -> str:
+    return "Адрес не похож на Solana-адрес: 32–44 символа base58."
 
-    <h2>Чего здесь нет</h2>
-    <p class="note">Это не финансовый совет. SignalForge не хранит ключи и не покупает, не продаёт и не отправляет сделки от имени подписчика.</p>
-    <p class="muted">Проверки покрывают mint authority, freeze authority, LP на Raydium, концентрацию холдеров и общий источник финансирования. Отсутствие флага не доказывает, что другой схемы нет.</p>
-  </main>
-</body>
-</html>
-"""
+
+def watch_saved_text(address: str, label: str | None) -> str:
+    name = f" ({label})" if label else ""
+    return (
+        f"Кошелёк записан{name}: {address}\n"
+        "Сделки появятся, когда Helius webhook уже включает этот адрес."
+    )
+
+
+def watch_duplicate_text() -> str:
+    return "Этот кошелёк уже в списке."
+
+
+def unwatch_done_text(address: str) -> str:
+    return f"Кошелёк убран: {address}"
+
+
+def unwatch_missing_text() -> str:
+    return "Такого кошелька в списке нет."
+
+
+def unwatch_blocked_text() -> str:
+    return "У кошелька уже есть сделки, удалить его нельзя."
+
+
+def wallets_text(lines: list[str]) -> str:
+    if not lines:
+        return "Список пуст. Добавьте адрес командой /watch."
+    return "Кошельки:\n" + "\n".join(lines)
+
+
+def signals_text(lines: list[str]) -> str:
+    if not lines:
+        return "Сигналов пока нет."
+    return "Последние сигналы:\n" + "\n".join(lines)
+
+
+def risk_missing_text() -> str:
+    return "Сохранённого скана по этому mint нет."
+
+
+def risk_text(*, mint: str, risk_score: int, flags: list[str]) -> str:
+    listed = ", ".join(flags) if flags else "нет"
+    return (
+        f"{mint}\n"
+        f"risk_score: {risk_score}\n"
+        f"flags: {listed}\n"
+        "Это сохранённый скан, не новый запрос в сеть. "
+        "100 значит, что известные проверки прошли, и не значит, что токен безопасен.\n"
+        f"{DISCLAIMER}"
+    )
+
+
