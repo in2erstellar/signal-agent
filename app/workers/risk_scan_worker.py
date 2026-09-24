@@ -6,6 +6,7 @@ check reads that result instead of calling Helius a second time.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import RISK_SCAN_GROUP, RISK_SCAN_QUEUE
 from app.db.models import FunderCluster, Token
+from app.observability import bind_trace, new_trace_id, record_risk_scan_latency
 from app.services.risk_scanner import RiskReport, RiskScanner
 
 logger = structlog.get_logger(__name__)
@@ -69,27 +71,39 @@ class RiskScanWorker:
             if self._stopping():
                 break
             mint = str(fields.get("mint") or "")
+            trace_id = str(fields.get("trace_id") or "") or new_trace_id()
             try:
                 if not mint:
                     await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
                     failed += 1
-                    logger.warning("risk_scan_failed", reason="missing_mint", message_id=message_id)
+                    with bind_trace(trace_id):
+                        logger.warning(
+                            "risk_scan_failed",
+                            reason="missing_mint",
+                            message_id=message_id,
+                        )
                     continue
-                await self._scan(mint)
+                started = time.perf_counter()
+                try:
+                    with bind_trace(trace_id):
+                        await self._scan(mint, trace_id)
+                finally:
+                    record_risk_scan_latency(time.perf_counter() - started)
                 await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
                 processed += 1
             except Exception as exc:
                 failed += 1
-                logger.warning(
-                    "risk_scan_failed",
-                    mint=mint,
-                    message_id=message_id,
-                    error_type=type(exc).__name__,
-                )
+                with bind_trace(trace_id):
+                    logger.warning(
+                        "risk_scan_failed",
+                        mint=mint,
+                        message_id=message_id,
+                        error_type=type(exc).__name__,
+                    )
         logger.info("risk_scan_cycle", processed=processed, failed=failed)
         return processed, failed
 
-    async def _scan(self, mint: str) -> RiskReport:
+    async def _scan(self, mint: str, trace_id: str) -> RiskReport:
         async with self._sessions() as session:
             async with session.begin():
                 clusters = await self._funder_factory(session).build_graph_for_token(mint)
@@ -103,6 +117,7 @@ class RiskScanWorker:
                 token.mint_authority_renounced = _passed(report, "check_mint_authority")
                 token.freeze_authority_renounced = _passed(report, "check_freeze_authority")
                 token.updated_at = report.scanned_at
+                token.trace_id = trace_id
                 logger.info(
                     "risk_scan_stored",
                     mint=mint,

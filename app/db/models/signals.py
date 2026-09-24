@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Numeric,
+    String,
     UniqueConstraint,
     Uuid,
     false,
@@ -52,6 +53,7 @@ class Signal(Base):
         server_default=false(),
         default=False,
     )
+    trace_id: Mapped[str | None] = mapped_column(String)
 
     token: Mapped[Token] = relationship(back_populates="signals")
 

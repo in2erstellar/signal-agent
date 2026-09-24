@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:2.30.1-pg16-oss
+        env:
+          POSTGRES_USER: signalforge
+          POSTGRES_PASSWORD: signalforge
+          POSTGRES_DB: signalforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U signalforge -d signalforge"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://signalforge:signalforge@127.0.0.1:5432/signalforge
+      REDIS_URL: redis://127.0.0.1:6379/0
+      ENVIRONMENT: dev
+      LOG_LEVEL: INFO
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.18"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Lint
+        run: uv run ruff check app tests
+
+      - name: Type-check services and adapters
+        run: uv run mypy --strict app/services app/adapters
+
+      - name: Test with coverage
+        run: uv run pytest --cov=app/services --cov-report=term-missing --cov-fail-under=70
+
+      - name: Install gitleaks
+        run: |
+          curl -sSL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+
+      - name: Secret scan
+        run: /tmp/gitleaks detect --source . --redact --verbose --exit-code 1

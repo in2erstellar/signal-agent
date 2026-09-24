@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,7 +26,7 @@ from app.config import (
     MIN_SCORE_CHOICES,
 )
 from app.db.models import AlertDelivery, User
-from app.services.subscriber_settings import parse_settings, with_updates
+from app.services.subscriber_settings import AlertPrefs, parse_settings, with_updates
 from app.templates import (
     max_risk_label,
     min_score_label,
@@ -73,16 +74,32 @@ class PerChatRateLimiter:
             self._next_at[chat_id] = now + self._interval
 
 
+class AlertBot(Protocol):
+    """The slice of ``telegram.Bot.send_message`` the dispatcher uses.
+
+    Typed as a protocol so tests can pass a fake without importing a live bot.
+    """
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        parse_mode: str,
+        link_preview_options: LinkPreviewOptions,
+    ) -> Any: ...
+
+
 class TelegramAlertSender:
     """Send one HTML alert through the bot, after the per-chat limiter."""
 
-    def __init__(self, bot: object, limiter: PerChatRateLimiter | None = None) -> None:
+    def __init__(self, bot: AlertBot, limiter: PerChatRateLimiter | None = None) -> None:
         self._bot = bot
         self._limiter = limiter or PerChatRateLimiter()
 
     async def send(self, chat_id: int, text: str) -> None:
         await self._limiter.wait(chat_id)
-        await self._bot.send_message(  # type: ignore[attr-defined]
+        await self._bot.send_message(
             chat_id=chat_id,
             text=text,
             parse_mode="HTML",
@@ -100,7 +117,7 @@ def build_application(
     sessions: async_sessionmaker[AsyncSession],
     *,
     clock: Clock | None = None,
-) -> Application:
+) -> Application[Any, Any, Any, Any, Any, Any]:
     application = Application.builder().token(token).build()
     application.bot_data["sessions"] = sessions
     application.bot_data["clock"] = clock or (lambda: datetime.now(timezone.utc))
@@ -220,7 +237,10 @@ async def _register(session: AsyncSession, telegram_id: int, now: datetime) -> N
     row.settings = with_updates(row.settings, active=True)
 
 
-async def _prefs_for(context: ContextTypes.DEFAULT_TYPE, telegram_id: int):
+async def _prefs_for(
+    context: ContextTypes.DEFAULT_TYPE,
+    telegram_id: int,
+) -> AlertPrefs | None:
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
     async with sessions() as session:
         row = await session.scalar(select(User).where(User.telegram_id == telegram_id))

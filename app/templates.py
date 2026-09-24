@@ -7,7 +7,6 @@ from __future__ import annotations
 from decimal import Decimal
 from html import escape
 
-
 DISCLAIMER = "Not financial advice. DYOR."
 BAIT_WARNING = "⚠️ Обнаружен паттерн copy-trade baiting"
 

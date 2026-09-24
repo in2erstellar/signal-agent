@@ -40,6 +40,7 @@ class Token(Base):
     risk_score: Mapped[Decimal | None] = mapped_column(Numeric)
     risk_flags: Mapped[list[Any] | None] = mapped_column(JSONB)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trace_id: Mapped[str | None] = mapped_column(String)
 
     transactions: Mapped[list[WalletTx]] = relationship(
         back_populates="token",

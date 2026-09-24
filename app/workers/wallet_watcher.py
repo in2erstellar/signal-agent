@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import BAIT_CHECK_QUEUE, BAIT_RECHECK_DELAY_MINUTES, RISK_SCAN_QUEUE
 from app.db.models import Token, TrackedWallet, WalletTx
+from app.observability import bind_trace, new_trace_id, record_webhook
 from app.services.bait_detector import PendingBaitCheck
 from app.workers.queues import bait_member, score_for
 
@@ -94,14 +95,25 @@ class WalletWatcher:
             risk_enqueued=stored.risk_jobs,
             bait_enqueued=stored.bait_jobs,
         )
-        logger.info(
-            "webhook_handled",
-            stored=result.stored,
-            duplicated=result.duplicated,
-            skipped=result.skipped,
-            risk_enqueued=result.risk_enqueued,
-            bait_enqueued=result.bait_enqueued,
-        )
+        record_webhook()
+        summary_trace = stored.jobs[0].trace_id if len({job.trace_id for job in stored.jobs}) == 1 else None
+        with bind_trace(summary_trace):
+            logger.info(
+                "webhook_handled",
+                stored=result.stored,
+                duplicated=result.duplicated,
+                skipped=result.skipped,
+                risk_enqueued=result.risk_enqueued,
+                bait_enqueued=result.bait_enqueued,
+            )
+        for job in stored.jobs:
+            with bind_trace(job.trace_id):
+                logger.info(
+                    "webhook_buy_traced",
+                    mint=job.mint,
+                    risk_enqueued=job.risk,
+                    signature=job.bait.buy_signature if job.bait is not None else None,
+                )
         return result
 
     def _authorize(self, authorization: str | None) -> None:
@@ -151,6 +163,7 @@ class WalletWatcher:
                 _Job(
                     mint=swap.mint,
                     risk=enqueue_risk,
+                    trace_id=new_trace_id(),
                     bait=PendingBaitCheck(
                         wallet_address=swap.wallet_address,
                         token_mint=swap.mint,
@@ -176,7 +189,10 @@ class WalletWatcher:
         for job in jobs:
             if job.risk and job.mint not in risk_mints:
                 risk_mints.append(job.mint)
-                await self._redis.xadd(RISK_SCAN_QUEUE, {"mint": job.mint})
+                await self._redis.xadd(
+                    RISK_SCAN_QUEUE,
+                    {"mint": job.mint, "trace_id": job.trace_id},
+                )
             if job.bait is not None:
                 pending = job.bait
                 await self._redis.zadd(
@@ -191,6 +207,7 @@ class _Job:
     mint: str
     risk: bool
     bait: PendingBaitCheck | None
+    trace_id: str
 
 
 @dataclass

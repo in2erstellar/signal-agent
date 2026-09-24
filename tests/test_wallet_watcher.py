@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import BAIT_CHECK_QUEUE, BAIT_RECHECK_DELAY_MINUTES, RISK_SCAN_QUEUE
-from app.db.models import Token, TrackedWallet, WalletTx
+from app.db.models import Token, WalletTx
 from app.main import app
 from app.workers.wallet_watcher import (
     WalletWatcher,
@@ -166,6 +166,9 @@ async def test_webhook_stores_buy_and_second_delivery_does_not_duplicate(watcher
     assert token is not None
     assert token.risk_score is None
     assert await redis.xlen(RISK_SCAN_QUEUE) == 2
+    messages = await redis.xrange(RISK_SCAN_QUEUE)
+    assert messages[0][1]["trace_id"]
+    assert messages[1][1]["trace_id"]
     assert await redis.zcard(BAIT_CHECK_QUEUE) == 1
     members = await redis.zrange(BAIT_CHECK_QUEUE, 0, -1, withscores=True)
     assert members[0][1] == (clock.now + timedelta(minutes=BAIT_RECHECK_DELAY_MINUTES)).timestamp()

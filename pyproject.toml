@@ -9,6 +9,7 @@ dependencies = [
     "asyncpg==0.31.0",
     "fastapi==0.141.1",
     "httpx==0.28.1",
+    "prometheus-client==0.23.1",
     "pydantic-settings==2.15.0",
     "python-telegram-bot==22.5",
     "redis==8.1.0",
@@ -19,8 +20,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mypy==1.18.2",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "pytest-cov==7.0.0",
+    "ruff==0.13.2",
     "testcontainers==4.13.3",
 ]
 
@@ -34,3 +38,21 @@ packages = ["app"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+packages = ["app.services", "app.adapters"]
+strict = true

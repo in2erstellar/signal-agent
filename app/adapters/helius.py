@@ -316,8 +316,10 @@ def _retry_delay(headers: httpx.Headers, attempt: int) -> float:
         try:
             return max(0.0, float(raw))
         except ValueError:
-            parsed = parsedate_to_datetime(raw)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+            parsed_raw = parsedate_to_datetime(raw)
+            if not isinstance(parsed_raw, datetime):
+                return _backoff_seconds(attempt)
+            if parsed_raw.tzinfo is None:
+                parsed_raw = parsed_raw.replace(tzinfo=timezone.utc)
+            return max(0.0, (parsed_raw - datetime.now(timezone.utc)).total_seconds())
     return _backoff_seconds(attempt)

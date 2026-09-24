@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import Forbidden, TelegramError
 
 from app.db.models import AlertDelivery, BaitFlag, Signal, Token, User
+from app.observability import bind_trace, record_alert_sent
 from app.services.subscriber_settings import accepts_alert, parse_settings, with_updates
 from app.templates import alert_text
 
@@ -50,6 +51,7 @@ class _Snapshot:
     risk_score: Decimal | None
     risk_flags: list[str]
     bait_warning: bool
+    trace_id: str | None
     recipients: list[_Recipient]
 
 
@@ -122,33 +124,35 @@ class AlertDispatcher:
             risk_flags=snapshot.risk_flags,
             bait_warning=snapshot.bait_warning,
         )
-        for recipient in snapshot.recipients:
-            try:
-                await self._sender.send(recipient.telegram_id, text)
-            except Forbidden:
-                deactivated.append(recipient.user_id)
+        with bind_trace(snapshot.trace_id):
+            for recipient in snapshot.recipients:
+                try:
+                    await self._sender.send(recipient.telegram_id, text)
+                except Forbidden:
+                    deactivated.append(recipient.user_id)
+                    logger.info(
+                        "alert_user_deactivated",
+                        telegram_id=recipient.telegram_id,
+                        signal_id=str(signal_id),
+                    )
+                    continue
+                except TelegramError as exc:
+                    failed += 1
+                    logger.warning(
+                        "alert_send_failed",
+                        telegram_id=recipient.telegram_id,
+                        error=type(exc).__name__,
+                        signal_id=str(signal_id),
+                    )
+                    continue
+                delivered.append(recipient.user_id)
+                sent += 1
+                record_alert_sent()
                 logger.info(
-                    "alert_user_deactivated",
+                    "alert_sent",
                     telegram_id=recipient.telegram_id,
                     signal_id=str(signal_id),
                 )
-                continue
-            except TelegramError as exc:
-                failed += 1
-                logger.warning(
-                    "alert_send_failed",
-                    telegram_id=recipient.telegram_id,
-                    error=type(exc).__name__,
-                    signal_id=str(signal_id),
-                )
-                continue
-            delivered.append(recipient.user_id)
-            sent += 1
-            logger.info(
-                "alert_sent",
-                telegram_id=recipient.telegram_id,
-                signal_id=str(signal_id),
-            )
         await self._persist(
             signal_id,
             delivered,
@@ -197,6 +201,7 @@ class AlertDispatcher:
                 risk_score=signal.risk_score,
                 risk_flags=[str(flag) for flag in flags],
                 bait_warning=bool(bait_count),
+                trace_id=signal.trace_id,
                 recipients=recipients,
             )
 

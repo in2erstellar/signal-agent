@@ -30,6 +30,7 @@ from app.config import (
     SIGNAL_WALLET_WEIGHT,
 )
 from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
+from app.observability import bind_trace
 
 logger = structlog.get_logger(__name__)
 
@@ -139,12 +140,13 @@ class SignalFusion:
         risk = token.risk_score if token.risk_score is not None else Decimal(0)
         score = composite_score(risk, wallet_score, Decimal(penalty or 0))
         if not emits_signal(score):
-            logger.info(
-                "signal_below_threshold",
-                mint=token.mint,
-                composite_score=str(score),
-                threshold=str(SIGNAL_THRESHOLD),
-            )
+            with bind_trace(token.trace_id):
+                logger.info(
+                    "signal_below_threshold",
+                    mint=token.mint,
+                    composite_score=str(score),
+                    threshold=str(SIGNAL_THRESHOLD),
+                )
             return False
         inserted_id = await session.scalar(
             pg_insert(Signal)
@@ -155,18 +157,20 @@ class SignalFusion:
                 composite_score=score,
                 triggered_at=now,
                 notified=False,
+                trace_id=token.trace_id,
             )
             .on_conflict_do_nothing(constraint="uq_signals_token_id")
             .returning(Signal.id)
         )
         inserted = inserted_id is not None
         if inserted:
-            logger.info(
-                "signal_created",
-                mint=token.mint,
-                composite_score=str(score),
-                risk_score=str(risk),
-                wallet_score=str(wallet_score),
-                bait_flag_penalty=str(penalty or 0),
-            )
+            with bind_trace(token.trace_id):
+                logger.info(
+                    "signal_created",
+                    mint=token.mint,
+                    composite_score=str(score),
+                    risk_score=str(risk),
+                    wallet_score=str(wallet_score),
+                    bait_flag_penalty=str(penalty or 0),
+                )
         return inserted

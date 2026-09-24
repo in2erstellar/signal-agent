@@ -6,13 +6,14 @@ Helius is a scripted double. The databases are not.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.adapters.helius import FundingInfo
 from app.adapters.token_security import HolderBook, HolderRow, LpBook, LpHolderRow, MintView
 from app.config import configure_logging
 from app.db.models import BaitFlag, Signal, Token, WalletTx
@@ -24,11 +25,9 @@ from app.workers.signal_fusion import SignalFusion
 from app.workers.wallet_watcher import WalletWatcher
 from tests.factories import make_tracked_wallet
 from tests.pipeline_containers import truncate_pipeline
-
-pytest_plugins = ["tests.pipeline_containers"]
 from tests.test_wallet_watcher import MINT, SECRET, T0, WALLET, helius_buy
 
-from app.adapters.helius import FundingInfo
+pytest_plugins = ["tests.pipeline_containers"]
 
 LOG_PATH = "/tmp/signalforge_pipeline_cycle.log"
 ROOT_FUNDER = "RootFunder11111111111111111111111111111111"
