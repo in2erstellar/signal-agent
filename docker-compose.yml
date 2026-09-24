@@ -34,6 +34,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       HELIUS_API_KEY: replace-me
       HELIUS_WEBHOOK_SECRET: replace-me
+      HELIUS_API_BASE_URL: https://api.helius.xyz
+      HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       TELEGRAM_BOT_TOKEN: replace-me
       ANTHROPIC_API_KEY: replace-me
       TWITTER_BEARER_TOKEN: replace-me

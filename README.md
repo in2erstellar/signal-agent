@@ -26,6 +26,16 @@ uv run pytest tests/test_models.py
 
 `tests/test_models.py` нужен запущенный Postgres с TimescaleDB (`docker-compose up -d postgres`). Тест сам создаёт отдельную базу и гоняет Alembic.
 
+## Граф фандеров
+
+Юнит-тесты не ходят в Helius. Живой прогон по mint, с ключом из `.env`:
+
+```bash
+uv run python scripts/manual_test_funder_graph.py <TOKEN_MINT>
+```
+
+`funded-by` на бесплатном ключе Helius отвечает 403. Нужен платный план.
+
 ## Миграции
 
 Образ Postgres в compose: `timescale/timescaledb:2.30.1-pg16-oss`.

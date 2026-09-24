@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     redis_url: str
     helius_api_key: SecretStr = Field(default=SecretStr(""))
     helius_webhook_secret: SecretStr = Field(default=SecretStr(""))
+    helius_api_base_url: str = "https://api.helius.xyz"
+    helius_rpc_url: str = "https://mainnet.helius-rpc.com"
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
     anthropic_api_key: SecretStr = Field(default=SecretStr(""))
     twitter_bearer_token: SecretStr = Field(default=SecretStr(""))
@@ -80,6 +82,13 @@ class Settings(BaseSettings):
         if not value.startswith(("redis://", "rediss://")):
             raise ValueError("REDIS_URL must start with redis:// or rediss://")
         return value
+
+    @field_validator("helius_api_base_url", "helius_rpc_url")
+    @classmethod
+    def helius_url_must_be_https(cls, value: str) -> str:
+        if not value.startswith("https://"):
+            raise ValueError("Helius URLs must start with https://")
+        return value.rstrip("/")
 
 
 @lru_cache(maxsize=1)
