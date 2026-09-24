@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -61,6 +62,7 @@ class Settings(BaseSettings):
     helius_webhook_secret: SecretStr = Field(default=SecretStr(""))
     helius_api_base_url: str = "https://api.helius.xyz"
     helius_rpc_url: str = "https://mainnet.helius-rpc.com"
+    raydium_api_base_url: str = "https://api-v3.raydium.io"
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
     anthropic_api_key: SecretStr = Field(default=SecretStr(""))
     twitter_bearer_token: SecretStr = Field(default=SecretStr(""))
@@ -83,12 +85,37 @@ class Settings(BaseSettings):
             raise ValueError("REDIS_URL must start with redis:// or rediss://")
         return value
 
-    @field_validator("helius_api_base_url", "helius_rpc_url")
+    @field_validator("helius_api_base_url", "helius_rpc_url", "raydium_api_base_url")
     @classmethod
-    def helius_url_must_be_https(cls, value: str) -> str:
+    def https_base_url(cls, value: str) -> str:
         if not value.startswith("https://"):
-            raise ValueError("Helius URLs must start with https://")
+            raise ValueError("Service base URLs must start with https://")
         return value.rstrip("/")
+
+
+# Points added to risk_score when a check passes. 100 means every check passed.
+# A perfect score is not a statement that the token is safe; it only means
+# none of these known patterns fired. Recalibrate here, not inside RiskScanner.
+RISK_CHECK_WEIGHTS: dict[str, int] = {
+    "check_mint_authority": 20,
+    "check_freeze_authority": 25,
+    "check_lp_lock": 25,
+    "check_holder_concentration": 15,
+    "check_funder_cluster_exposure": 15,
+}
+
+# Top-10 share of supply, LP vaults excluded. Above this, the check does not pass.
+HOLDER_CONCENTRATION_MAX_SHARE = Decimal("0.50")
+
+# Funder-cluster confidence is a 0-1 heuristic from funder_graph.confidence_for.
+# Strictly above this value is a sybil-style risk flag.
+FUNDER_CLUSTER_RISK_CONFIDENCE = Decimal("0.5")
+
+# Share of current LP supply that must sit at a burn address or known lock program.
+LP_LOCKED_MIN_SHARE = Decimal("0.95")
+
+if sum(RISK_CHECK_WEIGHTS.values()) != 100:
+    raise RuntimeError("RISK_CHECK_WEIGHTS must sum to 100")
 
 
 @lru_cache(maxsize=1)

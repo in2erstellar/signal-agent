@@ -147,6 +147,10 @@ class HeliusClient:
         )
         return parse_holder_owners(token_accounts, list(multiple.get("value") or []))
 
+    async def rpc(self, method: str, params: list[Any]) -> dict[str, Any]:
+        """JSON-RPC result object. Retries and timeouts match the rest of the client."""
+        return await self._rpc(method, params)
+
     async def _rpc(self, method: str, params: list[Any]) -> dict[str, Any]:
         response = await self._request(
             "POST",
