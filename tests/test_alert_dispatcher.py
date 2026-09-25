@@ -120,7 +120,7 @@ async def test_dispatcher_sends_only_to_users_inside_both_filters(sessions: obje
     assert len(sender.sent) == 1
 
 
-async def test_owner_filter_skips_other_telegram_accounts(sessions: object) -> None:
+async def test_every_matching_user_receives_the_alert(sessions: object) -> None:
     await _seed(
         sessions,
         users=[
@@ -130,15 +130,10 @@ async def test_owner_filter_skips_other_telegram_accounts(sessions: object) -> N
         bait=False,
     )
     sender = RecordingSender()
-    dispatcher = AlertDispatcher(
-        sessions,  # type: ignore[arg-type]
-        sender,
-        clock=lambda: T0,
-        owners=frozenset({401}),
-    )
+    dispatcher = AlertDispatcher(sessions, sender, clock=lambda: T0)  # type: ignore[arg-type]
     processed, failed, sent = await dispatcher.run_once()
-    assert (processed, failed, sent) == (1, 0, 1)
-    assert [chat for chat, _ in sender.sent] == [401]
+    assert (processed, failed, sent) == (1, 0, 2)
+    assert {chat for chat, _ in sender.sent} == {401, 402}
 
 
 async def test_blocked_user_is_deactivated_and_not_retried(sessions: object) -> None:
@@ -204,7 +199,13 @@ async def _seed(sessions: object, *, users: list[tuple[int, dict]], bait: bool) 
                 risk_flags=["check_funder_cluster_exposure"],
             )
             wallet = make_tracked_wallet()
-            session.add_all([token, wallet, *[make_user(telegram_id=tid, settings=settings) for tid, settings in users]])
+            session.add_all(
+                [
+                    token,
+                    wallet,
+                    *[make_user(telegram_id=tid, settings=settings) for tid, settings in users],
+                ]
+            )
             await session.flush()
             session.add(
                 make_signal(

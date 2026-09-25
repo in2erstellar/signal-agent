@@ -19,7 +19,7 @@ from app.adapters.telegram_bot import cmd_unwatch, cmd_watch
 from app.db.models import TrackedWallet
 from tests.factories import make_token, make_wallet_tx
 from tests.pipeline_containers import truncate_pipeline
-from tests.test_telegram_bot import TELEGRAM_ID, _command, _context
+from tests.test_telegram_bot import TELEGRAM_ID, _command, _context, grant_admin
 
 pytest_plugins = ["tests.pipeline_containers"]
 
@@ -120,6 +120,7 @@ async def test_network_error_raises_and_watch_does_not_keep_the_wallet(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     await truncate_pipeline(engine)
     try:
+        await grant_admin(sessions)
         context = _context(sessions)
         context.bot_data["helius"] = _FailingWebhooks()
         context.bot_data["webhook_id"] = WEBHOOK_ID
@@ -128,7 +129,9 @@ async def test_network_error_raises_and_watch_does_not_keep_the_wallet(
         await cmd_watch(update, context)
         assert "не удалось подписаться" in update.message.reply_text.await_args.args[0].lower()
         async with sessions() as session:
-            row = await session.scalar(select(TrackedWallet).where(TrackedWallet.address == ADDRESS))
+            row = await session.scalar(
+                select(TrackedWallet).where(TrackedWallet.address == ADDRESS)
+            )
         assert row is None
     finally:
         await truncate_pipeline(engine)
@@ -149,6 +152,7 @@ async def test_unwatch_keeps_the_wallet_when_helius_fails(pipeline_infra: object
                         first_seen_at=datetime.now(timezone.utc),
                     )
                 )
+        await grant_admin(sessions)
         context = _context(sessions)
         context.bot_data["helius"] = _FailingWebhooks()
         context.bot_data["webhook_id"] = WEBHOOK_ID
@@ -157,7 +161,9 @@ async def test_unwatch_keeps_the_wallet_when_helius_fails(pipeline_infra: object
         await cmd_unwatch(update, context)
         assert "кошелёк оставлен" in update.message.reply_text.await_args.args[0].lower()
         async with sessions() as session:
-            row = await session.scalar(select(TrackedWallet).where(TrackedWallet.address == ADDRESS))
+            row = await session.scalar(
+                select(TrackedWallet).where(TrackedWallet.address == ADDRESS)
+            )
         assert row is not None
     finally:
         await truncate_pipeline(engine)
@@ -183,6 +189,7 @@ async def test_unwatch_with_trades_does_not_call_helius(pipeline_infra: object) 
                         action="buy",
                     )
                 )
+        await grant_admin(sessions)
         context = _context(sessions)
         context.bot_data["helius"] = hooks
         context.bot_data["webhook_id"] = WEBHOOK_ID
@@ -192,7 +199,9 @@ async def test_unwatch_with_trades_does_not_call_helius(pipeline_infra: object) 
         assert "сделки" in update.message.reply_text.await_args.args[0]
         assert hooks.removed == []
         async with sessions() as session:
-            row = await session.scalar(select(TrackedWallet).where(TrackedWallet.address == ADDRESS))
+            row = await session.scalar(
+                select(TrackedWallet).where(TrackedWallet.address == ADDRESS)
+            )
         assert row is not None
     finally:
         await truncate_pipeline(engine)

@@ -30,8 +30,35 @@ def welcome_text() -> str:
     )
 
 
-def private_denied_text() -> str:
-    return "Этот бот закрыт. Ваш Telegram id нет в TELEGRAM_ADMIN_IDS."
+def user_welcome_text() -> str:
+    return (
+        "SignalForge sends token signals from wallets that admins watch.\n"
+        "\n"
+        "You can read signals, open a stored risk report, and set your own "
+        "alert threshold. You cannot add or remove wallets.\n"
+        "\n"
+        "/signals — latest signals\n"
+        "/risk mint — stored scan\n"
+        "/settings — your threshold\n"
+        "/status — your settings and alerts in the last 24 hours\n"
+        "\n"
+        "This bot does not buy or sell.\n"
+        f"{DISCLAIMER}"
+    )
+
+
+def admin_restricted_text() -> str:
+    return "This command is restricted."
+
+
+def menu_text(*, admin: bool) -> str:
+    if admin:
+        return "SignalForge. Wallet commands are on this menu."
+    return "SignalForge. Signals, settings, and status."
+
+
+def stale_menu_text() -> str:
+    return "This menu is out of date. Open /menu again."
 
 
 def unregistered_text() -> str:
@@ -189,5 +216,3 @@ def risk_text(*, mint: str, risk_score: int, flags: list[str]) -> str:
         "100 значит, что известные проверки прошли, и не значит, что токен безопасен.\n"
         f"{DISCLAIMER}"
     )
-
-

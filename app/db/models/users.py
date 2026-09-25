@@ -13,6 +13,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 USER_TIERS = ("free", "premium")
+USER_ROLES = ("user", "admin")
 
 
 class User(Base):
@@ -31,6 +32,12 @@ class User(Base):
         server_default=text("'free'"),
         default="free",
     )
+    role: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default=text("'user'"),
+        default="user",
+    )
     settings: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
@@ -41,4 +48,5 @@ class User(Base):
 
     __table_args__ = (
         CheckConstraint("tier IN ('free', 'premium')", name="tier_values"),
+        CheckConstraint("role IN ('user', 'admin')", name="role_values"),
     )

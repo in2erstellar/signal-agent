@@ -69,18 +69,13 @@ class AlertDispatcher:
         *,
         clock: Clock | None = None,
         stop: object | None = None,
-        owners: frozenset[int] | None = None,
     ) -> None:
         self._sessions = sessions
         self._sender = sender
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._stop = stop
-        self._owners = owners
 
     async def run_once(self) -> tuple[int, int, int]:
-        if self._owners is not None and not self._owners:
-            logger.info("alert_dispatch_skipped", reason="no_owners")
-            return 0, 0, 0
         processed = 0
         failed = 0
         sent = 0
@@ -175,9 +170,7 @@ class AlertDispatcher:
             if token is None:
                 return None
             bait_count = await session.scalar(
-                select(func.count())
-                .select_from(BaitFlag)
-                .where(BaitFlag.token_id == token.id)
+                select(func.count()).select_from(BaitFlag).where(BaitFlag.token_id == token.id)
             )
             delivered = set(
                 await session.scalars(
@@ -190,8 +183,6 @@ class AlertDispatcher:
                 if user.id in delivered:
                     continue
                 prefs = parse_settings(user.settings)
-                if self._owners is not None and user.telegram_id not in self._owners:
-                    continue
                 if not accepts_alert(
                     prefs,
                     composite_score=signal.composite_score,
@@ -227,14 +218,10 @@ class AlertDispatcher:
                     await session.execute(
                         pg_insert(AlertDelivery)
                         .values(user_id=user_id, signal_id=signal_id, sent_at=now)
-                        .on_conflict_do_nothing(
-                            constraint="uq_alert_deliveries_user_id_signal_id"
-                        )
+                        .on_conflict_do_nothing(constraint="uq_alert_deliveries_user_id_signal_id")
                     )
                 if deactivated:
-                    rows = list(
-                        await session.scalars(select(User).where(User.id.in_(deactivated)))
-                    )
+                    rows = list(await session.scalars(select(User).where(User.id.in_(deactivated))))
                     for row in rows:
                         row.settings = with_updates(row.settings, active=False)
                 if mark_notified:

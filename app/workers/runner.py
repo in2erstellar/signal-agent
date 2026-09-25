@@ -112,8 +112,8 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         from app.adapters.telegram_bot import (
             PerChatRateLimiter,
             TelegramAlertSender,
-            build_application,
             admin_ids,
+            build_application,
             telegram_configured,
         )
 
@@ -130,7 +130,6 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             sessions,
             TelegramAlertSender(application.bot, PerChatRateLimiter()),
             stop=stop,
-            owners=admins,
         )
         await application.initialize()
         await application.start()

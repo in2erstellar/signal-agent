@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.adapters.telegram_bot import (
+    admin_ids,
     cmd_risk,
     cmd_settings,
     cmd_signals,
@@ -20,11 +21,10 @@ from app.adapters.telegram_bot import (
     cmd_wallets,
     cmd_watch,
     on_pref,
-    admin_ids,
 )
 from app.db.models import AlertDelivery, Token, TrackedWallet, User
 from app.services.subscriber_settings import parse_settings
-from app.templates import BAIT_WARNING, DISCLAIMER, alert_text, private_denied_text, welcome_text
+from app.templates import BAIT_WARNING, DISCLAIMER, alert_text, user_welcome_text, welcome_text
 from tests.factories import make_signal, make_token, make_user
 from tests.pipeline_containers import truncate_pipeline
 
@@ -73,6 +73,8 @@ async def test_start_registers_once_and_sends_the_welcome(sessions: object) -> N
         rows = list(await session.scalars(select(User)))
     assert len(rows) == 1
     assert rows[0].telegram_id == TELEGRAM_ID
+    assert rows[0].role == "admin"
+    assert rows[0].tier == "free"
     prefs = parse_settings(rows[0].settings)
     assert prefs.min_score == Decimal("50")
     assert prefs.max_risk == Decimal("100")
@@ -179,13 +181,29 @@ def test_admin_ids_parse_a_list_and_reject_junk() -> None:
         admin_ids("424242, me")
 
 
-async def test_stranger_cannot_register(sessions: object) -> None:
+async def grant_admin(sessions: object, telegram_id: int = TELEGRAM_ID) -> None:
+    async with sessions() as session:  # type: ignore[operator]
+        async with session.begin():
+            session.add(
+                User(
+                    telegram_id=telegram_id,
+                    tier="free",
+                    role="admin",
+                    settings={"min_score": "50", "max_risk": "100", "active": True},
+                    created_at=T0,
+                )
+            )
+
+
+async def test_stranger_can_register(sessions: object) -> None:
     update = _command(999)
     await cmd_start(update, _context(sessions))
-    assert update.message.reply_text.await_args.args[0] == private_denied_text()
+    assert update.message.reply_text.await_args.args[0] == user_welcome_text()
     async with sessions() as session:  # type: ignore[operator]
         rows = list(await session.scalars(select(User)))
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0].role == "user"
+    assert rows[0].tier == "free"
 
 
 class _RecordingWebhooks:
@@ -203,6 +221,7 @@ class _RecordingWebhooks:
 
 
 async def test_watch_lists_and_removes_a_wallet(sessions: object) -> None:
+    await grant_admin(sessions)
     context = _context(sessions)
     hooks = _RecordingWebhooks()
     context.bot_data["helius"] = hooks
@@ -230,6 +249,7 @@ async def test_watch_lists_and_removes_a_wallet(sessions: object) -> None:
 
 
 async def test_watch_rejects_a_bad_address(sessions: object) -> None:
+    await grant_admin(sessions)
     context = _context(sessions)
     update = _command()
     context.args = ["not-an-address"]

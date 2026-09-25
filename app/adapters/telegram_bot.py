@@ -34,19 +34,22 @@ from app.config import (
 from app.db.models import AlertDelivery, Signal, Token, TrackedWallet, User, WalletTx
 from app.services.subscriber_settings import AlertPrefs, parse_settings, with_updates
 from app.templates import (
+    admin_restricted_text,
     max_risk_label,
+    menu_text,
     min_score_label,
-    private_denied_text,
     risk_missing_text,
     risk_text,
     settings_text,
     signals_text,
+    stale_menu_text,
     status_text,
     unregistered_text,
     unwatch_blocked_text,
     unwatch_done_text,
     unwatch_missing_text,
     unwatch_unsubscribe_failed_text,
+    user_welcome_text,
     wallets_text,
     watch_duplicate_text,
     watch_invalid_text,
@@ -163,6 +166,7 @@ def build_application(
     application.bot_data["clock"] = clock or (lambda: datetime.now(timezone.utc))
     application.bot_data["admins"] = admins if admins is not None else frozenset()
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("menu", cmd_menu))
     application.add_handler(CommandHandler("settings", cmd_settings))
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("watch", cmd_watch))
@@ -171,6 +175,7 @@ def build_application(
     application.add_handler(CommandHandler("signals", cmd_signals))
     application.add_handler(CommandHandler("risk", cmd_risk))
     application.add_handler(CallbackQueryHandler(on_pref, pattern=r"^pref:"))
+    application.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:"))
     return application
 
 
@@ -181,21 +186,39 @@ def _admins(context: ContextTypes.DEFAULT_TYPE) -> frozenset[int]:
     return frozenset()
 
 
-async def _owner_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def _role_for(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> str | None:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+        if row is None:
+            return None
+        return row.role
+
+
+async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Wallet commands are admin-only. Other commands do not call this."""
     user = update.effective_user
-    if user is not None and user.id in _admins(context):
+    message = update.message
+    if user is None or message is None:
+        return False
+    if await _role_for(context, user.id) == "admin":
         return True
-    if update.message is not None:
-        await update.message.reply_text(private_denied_text())
-    elif update.callback_query is not None:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(private_denied_text())
+    await message.reply_text(admin_restricted_text())
     return False
 
 
+def menu_markup(*, admin: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("Signals", callback_data="menu:signals")],
+    ]
+    if admin:
+        rows.append([InlineKeyboardButton("Wallets", callback_data="menu:wallets")])
+    rows.append([InlineKeyboardButton("Settings", callback_data="menu:settings")])
+    rows.append([InlineKeyboardButton("Status", callback_data="menu:status")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _owner_allowed(update, context):
-        return
     user = update.effective_user
     message = update.message
     if user is None or message is None:
@@ -204,13 +227,66 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clock: Clock = context.bot_data["clock"]
     async with sessions() as session:
         async with session.begin():
-            await _register(session, user.id, clock())
-    await message.reply_text(welcome_text())
+            row = await _register(session, user.id, clock(), admins=_admins(context))
+            role = row.role
+    if role == "admin":
+        await message.reply_text(welcome_text())
+        return
+    await message.reply_text(user_welcome_text())
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    message = update.message
+    if user is None or message is None:
+        return
+    role = await _role_for(context, user.id)
+    if role is None:
+        await message.reply_text(unregistered_text())
+        return
+    admin = role == "admin"
+    await message.reply_text(menu_text(admin=admin), reply_markup=menu_markup(admin=admin))
+
+
+async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+    await query.answer()
+    action = (query.data or "").split(":")
+    if len(action) != 2 or action[0] != "menu":
+        await query.edit_message_text(stale_menu_text())
+        return
+    name = action[1]
+    role = await _role_for(context, user.id)
+    if name == "wallets":
+        if role != "admin":
+            await query.edit_message_text(admin_restricted_text())
+            return
+        await query.edit_message_text(await _wallets_body(context))
+        return
+    if name == "signals":
+        await query.edit_message_text(await _signals_body(context))
+        return
+    if name == "settings":
+        prefs = await _prefs_for(context, user.id)
+        if prefs is None:
+            await query.edit_message_text(unregistered_text())
+            return
+        await query.edit_message_text(
+            settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
+            reply_markup=_markup(prefs.min_score, prefs.max_risk),
+        )
+        return
+    if name == "status":
+        text = await _status_body(context, user.id)
+        await query.edit_message_text(text if text is not None else unregistered_text())
+        return
+    await query.edit_message_text(stale_menu_text())
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _owner_allowed(update, context):
-        return
     user = update.effective_user
     message = update.message
     if user is None or message is None:
@@ -226,45 +302,18 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _owner_allowed(update, context):
-        return
     user = update.effective_user
     message = update.message
     if user is None or message is None:
         return
-    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    clock: Clock = context.bot_data["clock"]
-    async with sessions() as session:
-        row = await session.scalar(select(User).where(User.telegram_id == user.id))
-        if row is None:
-            await message.reply_text(unregistered_text())
-            return
-        prefs = parse_settings(row.settings)
-        since = clock() - timedelta(hours=24)
-        alerts_24h = await session.scalar(
-            select(func.count())
-            .select_from(AlertDelivery)
-            .where(
-                AlertDelivery.user_id == row.id,
-                AlertDelivery.sent_at >= since,
-            )
-        )
-    await message.reply_text(
-        status_text(
-            min_score=prefs.min_score,
-            max_risk=prefs.max_risk,
-            active=prefs.active,
-            alerts_24h=int(alerts_24h or 0),
-        )
-    )
+    text = await _status_body(context, user.id)
+    await message.reply_text(text if text is not None else unregistered_text())
 
 
 async def on_pref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
     if query is None or user is None or not query.data:
-        return
-    if not await _owner_allowed(update, context):
         return
     await query.answer()
     parts = query.data.split(":")
@@ -316,7 +365,7 @@ async def _remove_webhook_address(context: ContextTypes.DEFAULT_TYPE, address: s
 
 
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _owner_allowed(update, context):
+    if not await _require_admin(update, context):
         return
     message = update.message
     if message is None:
@@ -359,7 +408,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _owner_allowed(update, context):
+    if not await _require_admin(update, context):
         return
     message = update.message
     if message is None:
@@ -401,12 +450,7 @@ async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await message.reply_text(unwatch_done_text(args[0]))
 
 
-async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _owner_allowed(update, context):
-        return
-    message = update.message
-    if message is None:
-        return
+async def _wallets_body(context: ContextTypes.DEFAULT_TYPE) -> str:
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
     async with sessions() as session:
         rows = list(
@@ -415,15 +459,10 @@ async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         )
     lines = [f"{row.address}" + (f" — {row.label}" if row.label else "") for row in rows]
-    await message.reply_text(wallets_text(lines))
+    return wallets_text(lines)
 
 
-async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _owner_allowed(update, context):
-        return
-    message = update.message
-    if message is None:
-        return
+async def _signals_body(context: ContextTypes.DEFAULT_TYPE) -> str:
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
     async with sessions() as session:
         rows = (
@@ -438,12 +477,51 @@ async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"{token.symbol or token.mint[:4]} composite {signal.composite_score} risk {signal.risk_score}"
         for signal, token in rows
     ]
-    await message.reply_text(signals_text(lines))
+    return signals_text(lines)
+
+
+async def _status_body(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> str | None:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    clock: Clock = context.bot_data["clock"]
+    async with sessions() as session:
+        row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+        if row is None:
+            return None
+        prefs = parse_settings(row.settings)
+        since = clock() - timedelta(hours=24)
+        alerts_24h = await session.scalar(
+            select(func.count())
+            .select_from(AlertDelivery)
+            .where(
+                AlertDelivery.user_id == row.id,
+                AlertDelivery.sent_at >= since,
+            )
+        )
+    return status_text(
+        min_score=prefs.min_score,
+        max_risk=prefs.max_risk,
+        active=prefs.active,
+        alerts_24h=int(alerts_24h or 0),
+    )
+
+
+async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(await _wallets_body(context))
+
+
+async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(await _signals_body(context))
 
 
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _owner_allowed(update, context):
-        return
     message = update.message
     if message is None:
         return
@@ -466,23 +544,32 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text(risk_text(mint=report.mint, risk_score=report.risk_score, flags=flags))
 
 
-async def _register(session: AsyncSession, telegram_id: int, now: datetime) -> None:
+async def _register(
+    session: AsyncSession,
+    telegram_id: int,
+    now: datetime,
+    *,
+    admins: frozenset[int],
+) -> User:
     row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
     if row is None:
-        session.add(
-            User(
-                telegram_id=telegram_id,
-                settings=with_updates(
-                    {},
-                    min_score=DEFAULT_MIN_SCORE,
-                    max_risk=DEFAULT_MAX_RISK,
-                    active=True,
-                ),
-                created_at=now,
-            )
+        row = User(
+            telegram_id=telegram_id,
+            tier="free",
+            role="admin" if telegram_id in admins else "user",
+            settings=with_updates(
+                {},
+                min_score=DEFAULT_MIN_SCORE,
+                max_risk=DEFAULT_MAX_RISK,
+                active=True,
+            ),
+            created_at=now,
         )
-        return
+        session.add(row)
+        await session.flush()
+        return row
     row.settings = with_updates(row.settings, active=True)
+    return row
 
 
 async def _prefs_for(
