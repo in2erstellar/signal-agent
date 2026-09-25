@@ -86,9 +86,11 @@ async def test_generate_token_review_posts_to_the_selected_host() -> None:
     assert seen[0].headers["Authorization"] == "Bearer gsk-test"
     body = json.loads(seen[0].content)
     assert body["model"] == "openai/gpt-oss-120b"
+    assert body["reasoning_effort"] == "low"
     assert "Do not tell the reader to buy" in body["messages"][0]["content"]
     grok_body = json.loads(seen[1].content)
     assert grok_body["model"] == "grok-4"
+    assert "reasoning_effort" not in grok_body
 
 
 async def test_missing_key_is_not_retried() -> None:

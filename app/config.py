@@ -237,10 +237,12 @@ if sum(RISK_CHECK_WEIGHTS.values()) != 100:
 # https://console.groq.com/docs/rate-limits (2026-09-25): 30 RPM, 1_000 RPD,
 # 8_000 TPM, 200_000 TPD. The org Limits page can override that summary.
 # AI_REVIEW_DAILY_TOKEN_BUDGET is 95% of TPD so a chars/4 estimate can be low
-# and still stop before the provider does. 150 calls of this prompt (116
-# estimated input tokens, or 516 with the 400-token completion cap) are 77_400
-# tokens, under both 190_000 and the 1_000 RPD. A burst of the whole hourly
-# cap is 10 * 516 = 5_160, under the 8_000 TPM.
+# and still stop before the provider does. A live ELIZABETH review with
+# reasoning_effort=low used 350 tokens (216 prompt, 134 completion, 27 of
+# them reasoning) and finished with finish_reason stop. 190_000 // 350 = 542,
+# which is above this call cap and above the 239 calls a day the hourly cap
+# can reach, so 150 stays. A burst of the hourly cap at 350 tokens is 3_500,
+# under the 8_000 TPM.
 AI_REVIEW_HOURLY_BUDGET = 10
 AI_REVIEW_DAILY_BUDGET = 150
 AI_REVIEW_DAILY_TOKEN_BUDGET = 190_000

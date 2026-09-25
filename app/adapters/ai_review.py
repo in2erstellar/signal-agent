@@ -27,6 +27,9 @@ logger = structlog.get_logger(__name__)
 REQUEST_TIMEOUT_SECONDS = 20.0
 MAX_ATTEMPTS = 3
 _MAX_REVIEW_CHARS = 1500
+# GPT-OSS accepts low, medium, or high. none is documented for Qwen only.
+# https://console.groq.com/docs/reasoning
+_GROQ_REASONING_EFFORT = "low"
 _RETRYABLE_STATUS = frozenset({408, 500, 502, 503, 504})
 _MAX_RETRY_AFTER_SECONDS = 60
 Sleep = Callable[[float], Awaitable[None]]
@@ -85,6 +88,10 @@ class TokenReviewInput:
 class TokenReview:
     text: str
     total_tokens: int | None = None
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -168,7 +175,7 @@ class AiReviewClient:
                 status_code=0,
                 retryable=False,
             )
-        body = {
+        body: dict[str, Any] = {
             "model": self._provider.model,
             "temperature": 0.2,
             "max_tokens": 400,
@@ -177,9 +184,18 @@ class AiReviewClient:
                 {"role": "user", "content": _user_prompt(token)},
             ],
         }
+        if self._provider_name == "groq":
+            body["reasoning_effort"] = _GROQ_REASONING_EFFORT
         response = await self._post(body)
         payload = response.json()
-        return TokenReview(text=_review_text(payload), total_tokens=_total_tokens(payload))
+        return TokenReview(
+            text=_review_text(payload),
+            total_tokens=_total_tokens(payload),
+            finish_reason=_finish_reason(payload),
+            prompt_tokens=_usage_int(payload, "prompt_tokens"),
+            completion_tokens=_usage_int(payload, "completion_tokens"),
+            reasoning_tokens=_reasoning_tokens(payload),
+        )
 
     async def _post(self, body: dict[str, Any]) -> httpx.Response:
         last_status = 0
@@ -359,16 +375,51 @@ def _backoff_seconds(retry_after: int | None, attempt: int) -> float:
     return float(min(retry_after, _MAX_RETRY_AFTER_SECONDS))
 
 
-def _total_tokens(payload: Any) -> int | None:
+def _usage(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     usage = payload.get("usage")
-    if not isinstance(usage, dict):
+    return usage if isinstance(usage, dict) else None
+
+
+def _nonneg_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
         return None
-    total = usage.get("total_tokens")
-    if isinstance(total, bool) or not isinstance(total, int):
+    return value if value >= 0 else None
+
+
+def _total_tokens(payload: Any) -> int | None:
+    usage = _usage(payload)
+    if usage is None:
         return None
-    return total if total >= 0 else None
+    return _nonneg_int(usage.get("total_tokens"))
+
+
+def _usage_int(payload: Any, name: str) -> int | None:
+    usage = _usage(payload)
+    if usage is None:
+        return None
+    return _nonneg_int(usage.get(name))
+
+
+def _reasoning_tokens(payload: Any) -> int | None:
+    usage = _usage(payload)
+    if usage is None:
+        return None
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    return _nonneg_int(details.get("reasoning_tokens"))
+
+
+def _finish_reason(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    reason = choices[0].get("finish_reason")
+    return reason if isinstance(reason, str) else None
 
 
 async def _async_sleep(delay: float) -> None:

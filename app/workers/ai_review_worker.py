@@ -36,6 +36,7 @@ from app.services.token_store import (
     AI_REVIEW_COMPLETED,
     AI_REVIEW_FAILED,
     AI_REVIEW_SKIPPED_BUDGET,
+    AI_REVIEW_TRUNCATED,
 )
 
 logger = structlog.get_logger(__name__)
@@ -115,6 +116,9 @@ class AiReviewWorker:
             if token.ai_review_status == AI_REVIEW_SKIPPED_BUDGET:
                 logger.info("ai_review_already_skipped_budget", mint=mint)
                 return True
+            if token.ai_review_status == AI_REVIEW_TRUNCATED:
+                logger.info("ai_review_already_truncated", mint=mint)
+                return True
             signal = await session.scalar(select(Signal).where(Signal.token_id == token.id))
             flags = token.risk_flags if isinstance(token.risk_flags, list) else []
             review_input = TokenReviewInput(
@@ -140,6 +144,9 @@ class AiReviewWorker:
                 )
                 return False
             await self._mark_failed(mint, fields)
+            return True
+        if review.finish_reason == "length":
+            await self._mark_truncated(mint, fields, review.total_tokens)
             return True
         await self._store(mint, review.text)
         await self._reconcile(fields, review.total_tokens)
@@ -189,6 +196,18 @@ class AiReviewWorker:
             quota_used=exc.quota_used,
             quota_remaining=exc.quota_remaining,
         )
+
+    async def _mark_truncated(self, mint: str, fields: dict[str, str], actual: int | None) -> None:
+        """A cut-off reply is not a card. The spent call and tokens stay reserved."""
+        async with self._sessions() as session:
+            async with session.begin():
+                token = await session.scalar(select(Token).where(Token.mint == mint))
+                if token is not None:
+                    token.ai_review = None
+                    token.ai_review_status = AI_REVIEW_TRUNCATED
+                    token.ai_review_at = self._clock()
+        await self._reconcile(fields, actual)
+        logger.warning("ai_review_truncated", mint=mint, total_tokens=actual)
 
     async def _mark_failed(self, mint: str, fields: dict[str, str]) -> None:
         async with self._sessions() as session:

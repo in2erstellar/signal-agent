@@ -39,7 +39,7 @@ from app.config import (
 from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace
 from app.services.ai_budget import release_review, reserve_review, review_counts, tokens_used
-from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING
+from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING, AI_REVIEW_TRUNCATED
 
 logger = structlog.get_logger(__name__)
 
@@ -303,8 +303,14 @@ def _review_input(token: Token, score: Decimal) -> TokenReviewInput:
 
 
 def _review_is_fresh(token: Token, now: datetime) -> bool:
+    if token.ai_review_status == AI_REVIEW_TRUNCATED:
+        return _review_clock_is_fresh(token, now)
     if token.ai_review_status != AI_REVIEW_COMPLETED or not token.ai_review:
         return False
+    return _review_clock_is_fresh(token, now)
+
+
+def _review_clock_is_fresh(token: Token, now: datetime) -> bool:
     reviewed = token.ai_review_at
     if reviewed is None:
         return False
