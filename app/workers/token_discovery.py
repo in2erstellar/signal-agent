@@ -250,6 +250,7 @@ class TokenDiscovery:
                 "token_discovery_holders_failed",
                 mint=item.mint,
                 error_type=type(exc).__name__,
+                error=str(exc),
                 holder_failures=self.holder_failures,
             )
             return False

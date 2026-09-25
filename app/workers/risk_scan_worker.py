@@ -105,6 +105,7 @@ class RiskScanWorker:
                         mint=mint,
                         message_id=message_id,
                         error_type=type(exc).__name__,
+                        error=str(exc),
                     )
         logger.info("risk_scan_cycle", processed=processed, failed=failed)
         return processed, failed
