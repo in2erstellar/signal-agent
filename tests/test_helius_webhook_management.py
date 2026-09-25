@@ -127,7 +127,7 @@ async def test_network_error_raises_and_watch_does_not_keep_the_wallet(
         update = _command(TELEGRAM_ID)
         context.args = [ADDRESS, "desk"]
         await cmd_watch(update, context)
-        assert "не удалось подписаться" in update.message.reply_text.await_args.args[0].lower()
+        assert "could not subscribe" in update.message.reply_text.await_args.args[0].lower()
         async with sessions() as session:
             row = await session.scalar(
                 select(TrackedWallet).where(TrackedWallet.address == ADDRESS)
@@ -159,7 +159,7 @@ async def test_unwatch_keeps_the_wallet_when_helius_fails(pipeline_infra: object
         update = _command(TELEGRAM_ID)
         context.args = [ADDRESS]
         await cmd_unwatch(update, context)
-        assert "кошелёк оставлен" in update.message.reply_text.await_args.args[0].lower()
+        assert "left on the list" in update.message.reply_text.await_args.args[0].lower()
         async with sessions() as session:
             row = await session.scalar(
                 select(TrackedWallet).where(TrackedWallet.address == ADDRESS)
@@ -196,7 +196,7 @@ async def test_unwatch_with_trades_does_not_call_helius(pipeline_infra: object) 
         update = _command(TELEGRAM_ID)
         context.args = [ADDRESS]
         await cmd_unwatch(update, context)
-        assert "сделки" in update.message.reply_text.await_args.args[0]
+        assert "trades" in update.message.reply_text.await_args.args[0]
         assert hooks.removed == []
         async with sessions() as session:
             row = await session.scalar(

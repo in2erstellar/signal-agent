@@ -11,15 +11,30 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
+from uuid import UUID
 
 import structlog
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    Message,
+    Update,
+)
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from app.adapters.helius import HeliusError
 from app.api.schemas import WalletCreate
@@ -28,36 +43,52 @@ from app.config import (
     ALERT_CHAT_INTERVAL_SECONDS,
     DEFAULT_MAX_RISK,
     DEFAULT_MIN_SCORE,
-    MAX_RISK_CHOICES,
-    MIN_SCORE_CHOICES,
+    SETTINGS_STEP,
+    SIGNAL_PAGE_SIZE,
 )
-from app.db.models import AlertDelivery, Signal, Token, TrackedWallet, User, WalletTx
+from app.db.models import AlertDelivery, BaitFlag, Signal, Token, TrackedWallet, User, WalletTx
+from app.services.dialog_state import clear_pending_input, get_pending_input, set_pending_input
 from app.services.subscriber_settings import AlertPrefs, parse_settings, with_updates
 from app.templates import (
     admin_restricted_text,
-    max_risk_label,
+    format_score,
     menu_text,
-    min_score_label,
+    risk_card_text,
     risk_missing_text,
-    risk_text,
+    risk_usage_text,
     settings_text,
+    signal_row,
     signals_text,
     stale_menu_text,
     status_text,
     unregistered_text,
     unwatch_blocked_text,
+    unwatch_confirm_text,
     unwatch_done_text,
     unwatch_missing_text,
     unwatch_unsubscribe_failed_text,
+    unwatch_usage_text,
     user_welcome_text,
+    wallet_button_label,
     wallets_text,
     watch_duplicate_text,
     watch_invalid_text,
+    watch_prompt_text,
     watch_saved_text,
     watch_subscribe_failed_text,
     watch_usage_text,
     watch_webhook_missing_text,
     welcome_text,
+)
+from app.ui_constants import (
+    ICON_ADD,
+    ICON_CANCEL,
+    ICON_CONFIRM,
+    ICON_DELETE,
+    ICON_SETTINGS,
+    ICON_SIGNAL,
+    ICON_STATUS,
+    ICON_WALLET,
 )
 
 logger = structlog.get_logger(__name__)
@@ -154,17 +185,31 @@ def admin_ids(raw: str) -> frozenset[int]:
     return frozenset(found)
 
 
+AWAITING_WALLET = "awaiting_wallet_address"
+_CALLBACK_KINDS = frozenset({"m", "w", "s", "set"})
+
+
+def parse_callback(data: str) -> tuple[str, tuple[str, ...]] | None:
+    """Split a callback into its kind and the rest. Unknown kinds are None."""
+    parts = data.split(":")
+    if not parts or parts[0] not in _CALLBACK_KINDS:
+        return None
+    return parts[0], tuple(parts[1:])
+
+
 def build_application(
     token: str,
     sessions: async_sessionmaker[AsyncSession],
     *,
     clock: Clock | None = None,
     admins: frozenset[int] | None = None,
+    redis: object | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
     application = Application.builder().token(token).build()
     application.bot_data["sessions"] = sessions
     application.bot_data["clock"] = clock or (lambda: datetime.now(timezone.utc))
     application.bot_data["admins"] = admins if admins is not None else frozenset()
+    application.bot_data["redis"] = redis
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("menu", cmd_menu))
     application.add_handler(CommandHandler("settings", cmd_settings))
@@ -174,8 +219,8 @@ def build_application(
     application.add_handler(CommandHandler("wallets", cmd_wallets))
     application.add_handler(CommandHandler("signals", cmd_signals))
     application.add_handler(CommandHandler("risk", cmd_risk))
-    application.add_handler(CallbackQueryHandler(on_pref, pattern=r"^pref:"))
-    application.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:"))
+    application.add_handler(CallbackQueryHandler(on_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_wallet_text))
     return application
 
 
@@ -184,6 +229,74 @@ def _admins(context: ContextTypes.DEFAULT_TYPE) -> frozenset[int]:
     if isinstance(raw, frozenset):
         return raw
     return frozenset()
+
+
+def _clock(context: ContextTypes.DEFAULT_TYPE) -> Clock:
+    clock = context.bot_data.get("clock")
+    if callable(clock):
+        return cast(Clock, clock)
+    return lambda: datetime.now(timezone.utc)
+
+
+def _redis(context: ContextTypes.DEFAULT_TYPE) -> Any:
+    return context.bot_data.get("redis")
+
+
+async def _send(
+    message: Message,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+
+async def _edit(
+    query: CallbackQuery,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+
+def menu_markup(*, admin: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(f"{ICON_SIGNAL} Signals", callback_data="m:signals")],
+    ]
+    if admin:
+        rows.append([InlineKeyboardButton(f"{ICON_WALLET} Wallets", callback_data="m:wallets")])
+    rows.append([InlineKeyboardButton(f"{ICON_SETTINGS} Settings", callback_data="m:settings")])
+    rows.append([InlineKeyboardButton(f"{ICON_STATUS} Status", callback_data="m:status")])
+    return InlineKeyboardMarkup(rows)
+
+
+def settings_markup(min_score: Decimal, max_risk: Decimal) -> InlineKeyboardMarkup:
+    step = format_score(SETTINGS_STEP)
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(f"− {step}", callback_data="set:min:-"),
+                InlineKeyboardButton(f" {format_score(min_score)} ", callback_data="set:hold"),
+                InlineKeyboardButton(f"+ {step}", callback_data="set:min:+"),
+            ],
+            [
+                InlineKeyboardButton(f"− {step}", callback_data="set:max:-"),
+                InlineKeyboardButton(f" {format_score(max_risk)} ", callback_data="set:hold"),
+                InlineKeyboardButton(f"+ {step}", callback_data="set:max:+"),
+            ],
+            [_menu_button()],
+        ]
+    )
+
+
+def _menu_button() -> InlineKeyboardButton:
+    return InlineKeyboardButton("Menu", callback_data="m:home")
+
+
+def _parse_uuid(raw: str) -> UUID | None:
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
 
 
 async def _role_for(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> str | None:
@@ -203,19 +316,15 @@ async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return False
     if await _role_for(context, user.id) == "admin":
         return True
-    await message.reply_text(admin_restricted_text())
+    await _send(message, admin_restricted_text())
     return False
 
 
-def menu_markup(*, admin: bool) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("Signals", callback_data="menu:signals")],
-    ]
-    if admin:
-        rows.append([InlineKeyboardButton("Wallets", callback_data="menu:wallets")])
-    rows.append([InlineKeyboardButton("Settings", callback_data="menu:settings")])
-    rows.append([InlineKeyboardButton("Status", callback_data="menu:status")])
-    return InlineKeyboardMarkup(rows)
+async def _clear_dialog(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> None:
+    redis = _redis(context)
+    if redis is None:
+        return
+    await clear_pending_input(redis, telegram_id)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -224,15 +333,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None or message is None:
         return
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    clock: Clock = context.bot_data["clock"]
     async with sessions() as session:
         async with session.begin():
-            row = await _register(session, user.id, clock(), admins=_admins(context))
+            row = await _register(session, user.id, _clock(context)(), admins=_admins(context))
             role = row.role
     if role == "admin":
-        await message.reply_text(welcome_text())
-        return
-    await message.reply_text(user_welcome_text())
+        await _send(message, welcome_text())
+    else:
+        await _send(message, user_welcome_text())
+    await _send_menu(message, admin=role == "admin")
 
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -242,48 +351,421 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     role = await _role_for(context, user.id)
     if role is None:
-        await message.reply_text(unregistered_text())
+        await _send(message, unregistered_text())
         return
-    admin = role == "admin"
-    await message.reply_text(menu_text(admin=admin), reply_markup=menu_markup(admin=admin))
+    await _send_menu(message, admin=role == "admin")
 
 
-async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _send_menu(message: Message, *, admin: bool) -> None:
+    await _send(message, menu_text(admin=admin), menu_markup(admin=admin))
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    user = update.effective_user
-    if query is None or user is None:
+    if query is None:
         return
     await query.answer()
-    action = (query.data or "").split(":")
-    if len(action) != 2 or action[0] != "menu":
-        await query.edit_message_text(stale_menu_text())
+    user = update.effective_user
+    parsed = parse_callback(query.data or "")
+    if user is None or parsed is None:
+        await _edit(query, stale_menu_text())
         return
-    name = action[1]
-    role = await _role_for(context, user.id)
+    kind, rest = parsed
+    handled = False
+    if kind == "m":
+        handled = await _route_menu(context, query, user.id, rest)
+    elif kind == "w":
+        handled = await _route_wallet(context, query, user.id, rest)
+    elif kind == "s":
+        handled = await _route_signal(context, query, rest)
+    elif kind == "set":
+        handled = await _route_settings(context, query, user.id, rest)
+    if not handled:
+        await _edit(query, stale_menu_text())
+
+
+async def _route_menu(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+    rest: tuple[str, ...],
+) -> bool:
+    if len(rest) != 1 or rest[0] not in {"signals", "wallets", "settings", "status", "home"}:
+        return False
+    role = await _role_for(context, telegram_id)
+    if role is None:
+        await _edit(query, unregistered_text())
+        return True
+    name = rest[0]
+    if name == "home":
+        await _edit(query, menu_text(admin=role == "admin"), menu_markup(admin=role == "admin"))
+        return True
     if name == "wallets":
         if role != "admin":
-            await query.edit_message_text(admin_restricted_text())
-            return
-        await query.edit_message_text(await _wallets_body(context))
-        return
+            await _edit(query, admin_restricted_text())
+            return True
+        await _show_wallets(context, query)
+        return True
     if name == "signals":
-        await query.edit_message_text(await _signals_body(context))
-        return
+        return await _show_signals(context, query, 0)
     if name == "settings":
-        prefs = await _prefs_for(context, user.id)
-        if prefs is None:
-            await query.edit_message_text(unregistered_text())
-            return
-        await query.edit_message_text(
-            settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
-            reply_markup=_markup(prefs.min_score, prefs.max_risk),
+        await _show_settings(context, query, telegram_id)
+        return True
+    text = await _status_body(context, telegram_id)
+    await _edit(
+        query,
+        text if text is not None else unregistered_text(),
+        InlineKeyboardMarkup([[_menu_button()]]),
+    )
+    return True
+
+
+async def _route_wallet(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+    rest: tuple[str, ...],
+) -> bool:
+    if not rest:
+        return False
+    action = rest[0]
+    if action == "hold":
+        return True
+    if action in {"no", "list"} and len(rest) == 1:
+        if await _role_for(context, telegram_id) != "admin":
+            await _edit(query, admin_restricted_text())
+            return True
+        await _clear_dialog(context, telegram_id)
+        await _show_wallets(context, query)
+        return True
+    if action == "add" and len(rest) == 1:
+        if await _role_for(context, telegram_id) != "admin":
+            await _edit(query, admin_restricted_text())
+            return True
+        return await _ask_wallet(context, query, telegram_id)
+    if action in {"del", "yes"} and len(rest) == 2:
+        wallet_id = _parse_uuid(rest[1])
+        if wallet_id is None:
+            return False
+        if await _role_for(context, telegram_id) != "admin":
+            await _edit(query, admin_restricted_text())
+            return True
+        if action == "del":
+            return await _confirm_delete(context, query, wallet_id)
+        return await _confirm_delete_yes(context, query, wallet_id)
+    return False
+
+
+async def _route_signal(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    rest: tuple[str, ...],
+) -> bool:
+    if not rest:
+        return False
+    if rest[0] == "hold":
+        return True
+    if rest[0] == "page" and len(rest) == 2 and rest[1].isdigit():
+        return await _show_signals(context, query, int(rest[1]))
+    if rest[0] == "open" and len(rest) == 3 and rest[2].isdigit():
+        signal_id = _parse_uuid(rest[1])
+        if signal_id is None:
+            return False
+        return await _show_signal(context, query, signal_id, int(rest[2]))
+    return False
+
+
+async def _route_settings(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+    rest: tuple[str, ...],
+) -> bool:
+    if rest == ("hold",):
+        return True
+    if len(rest) != 2 or rest[0] not in {"min", "max"} or rest[1] not in {"+", "-"}:
+        return False
+    delta = SETTINGS_STEP if rest[1] == "+" else -SETTINGS_STEP
+    await _adjust_setting(context, query, telegram_id, rest[0], delta)
+    return True
+
+
+async def _ask_wallet(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+) -> bool:
+    redis = _redis(context)
+    if redis is None:
+        await _edit(query, watch_usage_text(), InlineKeyboardMarkup([[_menu_button()]]))
+        return True
+    await set_pending_input(redis, telegram_id, AWAITING_WALLET)
+    cancel = InlineKeyboardButton(f"{ICON_CANCEL} Cancel", callback_data="w:no")
+    await _edit(query, watch_prompt_text(), InlineKeyboardMarkup([[cancel]]))
+    return True
+
+
+async def _confirm_delete(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    wallet_id: UUID,
+) -> bool:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        wallet = await session.get(TrackedWallet, wallet_id)
+        if wallet is None:
+            address = None
+            label = None
+        else:
+            address = wallet.address
+            label = wallet.label
+    if address is None:
+        await _edit(query, unwatch_missing_text(), InlineKeyboardMarkup([[_menu_button()]]))
+        return True
+    yes = InlineKeyboardButton(f"{ICON_CONFIRM} Yes, delete", callback_data=f"w:yes:{wallet_id}")
+    no = InlineKeyboardButton(f"{ICON_CANCEL} Cancel", callback_data="w:no")
+    await _edit(query, unwatch_confirm_text(address, label), InlineKeyboardMarkup([[yes, no]]))
+    return True
+
+
+async def _confirm_delete_yes(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    wallet_id: UUID,
+) -> bool:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        wallet = await session.get(TrackedWallet, wallet_id)
+        address = None if wallet is None else wallet.address
+    if address is None:
+        await _edit(query, unwatch_missing_text(), InlineKeyboardMarkup([[_menu_button()]]))
+        return True
+    text = await _unwatch_address(context, address)
+    wallets = InlineKeyboardButton(f"{ICON_WALLET} Wallets", callback_data="w:list")
+    await _edit(query, text, InlineKeyboardMarkup([[wallets]]))
+    return True
+
+
+async def _show_wallets(context: ContextTypes.DEFAULT_TYPE, query: CallbackQuery) -> None:
+    text, markup = await _wallet_view(context)
+    await _edit(query, text, markup)
+
+
+async def _wallet_view(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> tuple[str, InlineKeyboardMarkup]:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        rows = list(
+            await session.scalars(
+                select(TrackedWallet).order_by(TrackedWallet.first_seen_at.desc()).limit(15)
+            )
         )
+    buttons: list[list[InlineKeyboardButton]] = []
+    listed: list[tuple[str, str | None]] = []
+    for row in rows:
+        listed.append((row.address, row.label))
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    wallet_button_label(row.address, row.label), callback_data="w:hold"
+                )
+            ]
+        )
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    f"{ICON_DELETE} Delete",
+                    callback_data=f"w:del:{row.id}",
+                )
+            ]
+        )
+    buttons.append([InlineKeyboardButton(f"{ICON_ADD} Add wallet", callback_data="w:add")])
+    buttons.append([_menu_button()])
+    return wallets_text(listed), InlineKeyboardMarkup(buttons)
+
+
+async def _show_signals(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    page: int,
+) -> bool:
+    view = await _signal_view(context, page)
+    if view is None:
+        return False
+    text, markup = view
+    await _edit(query, text, markup)
+    return True
+
+
+async def _signal_view(
+    context: ContextTypes.DEFAULT_TYPE,
+    page: int,
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        total = int(await session.scalar(select(func.count()).select_from(Signal)) or 0)
+        if total == 0:
+            rows: list[tuple[Signal, Token]] = []
+            pages = 0
+        else:
+            pages = (total + SIGNAL_PAGE_SIZE - 1) // SIGNAL_PAGE_SIZE
+            if page < 0 or page >= pages:
+                return None
+            found = await session.execute(
+                select(Signal, Token)
+                .join(Token, Signal.token_id == Token.id)
+                .order_by(Signal.triggered_at.desc(), Signal.id.desc())
+                .offset(page * SIGNAL_PAGE_SIZE)
+                .limit(SIGNAL_PAGE_SIZE)
+            )
+            rows = [(signal, token) for signal, token in found.all()]
+    if pages == 0:
+        return signals_text(rows=[], page=0, pages=0), InlineKeyboardMarkup([[_menu_button()]])
+    lines = [
+        signal_row(token.symbol, signal.composite_score, signal.triggered_at)
+        for signal, token in rows
+    ]
+    buttons: list[list[InlineKeyboardButton]] = []
+    for signal, token in rows:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    signal_row(token.symbol, signal.composite_score, signal.triggered_at)[:60],
+                    callback_data=f"s:open:{signal.id}:{page}",
+                )
+            ]
+        )
+    back_data = f"s:page:{page - 1}" if page > 0 else "s:hold"
+    forward_data = f"s:page:{page + 1}" if page + 1 < pages else "s:hold"
+    buttons.append(
+        [
+            InlineKeyboardButton("◀️ Back", callback_data=back_data),
+            InlineKeyboardButton(f"Page {page + 1} of {pages}", callback_data="s:hold"),
+            InlineKeyboardButton("Forward ▶️", callback_data=forward_data),
+        ]
+    )
+    buttons.append([_menu_button()])
+    return signals_text(rows=lines, page=page + 1, pages=pages), InlineKeyboardMarkup(buttons)
+
+
+async def _show_signal(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    signal_id: UUID,
+    page: int,
+) -> bool:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        signal = await session.get(Signal, signal_id)
+        if signal is None:
+            return False
+        token = await session.get(Token, signal.token_id)
+        if token is None:
+            return False
+        bait_count = int(
+            await session.scalar(
+                select(func.count()).select_from(BaitFlag).where(BaitFlag.token_id == token.id)
+            )
+            or 0
+        )
+        symbol = token.symbol
+        mint = token.mint
+        composite = signal.composite_score
+        triggered_at = signal.triggered_at
+        risk_score = signal.risk_score if signal.risk_score is not None else token.risk_score
+        flags = _failed_flags(token)
+    text = risk_card_text(
+        symbol=symbol,
+        mint=mint,
+        risk_score=risk_score,
+        flags=flags,
+        bait_warning=bait_count > 0,
+        composite_score=composite,
+        triggered_at=triggered_at,
+    )
+    back = InlineKeyboardButton("◀️ Back", callback_data=f"s:page:{page}")
+    await _edit(query, text, InlineKeyboardMarkup([[back], [_menu_button()]]))
+    return True
+
+
+def _failed_flags(token: Token) -> list[str]:
+    try:
+        report = report_from_token(token)
+    except ValueError:
+        raw = token.risk_flags if isinstance(token.risk_flags, list) else []
+        return [str(flag) for flag in raw]
+    return [check.name for check in report.checks if check.passed is False]
+
+
+async def _show_settings(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+) -> None:
+    prefs = await _prefs_for(context, telegram_id)
+    if prefs is None:
+        await _edit(query, unregistered_text())
         return
-    if name == "status":
-        text = await _status_body(context, user.id)
-        await query.edit_message_text(text if text is not None else unregistered_text())
+    await _edit(
+        query,
+        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
+        settings_markup(prefs.min_score, prefs.max_risk),
+    )
+
+
+async def _adjust_setting(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+    field: str,
+    delta: Decimal,
+) -> None:
+    key = "min_score" if field == "min" else "max_risk"
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        async with session.begin():
+            row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+            if row is None:
+                await _edit(query, unregistered_text())
+                return
+            prefs = parse_settings(row.settings)
+            current = prefs.min_score if field == "min" else prefs.max_risk
+            updated = current + delta
+            if updated < 0 or updated > 100:
+                return
+            row.settings = with_updates(row.settings, **{key: updated})
+            prefs = parse_settings(row.settings)
+            min_score = prefs.min_score
+            max_risk = prefs.max_risk
+    await _edit(
+        query,
+        settings_text(min_score=min_score, max_risk=max_risk),
+        settings_markup(min_score, max_risk),
+    )
+
+
+async def on_wallet_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    message = update.message
+    if user is None or message is None or not message.text:
         return
-    await query.edit_message_text(stale_menu_text())
+    redis = _redis(context)
+    if redis is None:
+        return
+    state = await get_pending_input(redis, user.id)
+    if state != AWAITING_WALLET:
+        return
+    await clear_pending_input(redis, user.id)
+    if await _role_for(context, user.id) != "admin":
+        await _send(message, admin_restricted_text())
+        return
+    parts = message.text.split()
+    if not parts:
+        await _send(message, watch_prompt_text())
+        return
+    label = " ".join(parts[1:]).strip()[:64] or None
+    await _send(message, await _watch_address(context, parts[0], label))
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -293,11 +775,12 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     prefs = await _prefs_for(context, user.id)
     if prefs is None:
-        await message.reply_text(unregistered_text())
+        await _send(message, unregistered_text())
         return
-    await message.reply_text(
+    await _send(
+        message,
         settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
-        reply_markup=_markup(prefs.min_score, prefs.max_risk),
+        settings_markup(prefs.min_score, prefs.max_risk),
     )
 
 
@@ -307,37 +790,175 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if user is None or message is None:
         return
     text = await _status_body(context, user.id)
-    await message.reply_text(text if text is not None else unregistered_text())
+    await _send(
+        message,
+        text if text is not None else unregistered_text(),
+        InlineKeyboardMarkup([[_menu_button()]]),
+    )
 
 
-async def on_pref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user = update.effective_user
-    if query is None or user is None or not query.data:
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
         return
-    await query.answer()
-    parts = query.data.split(":")
-    if len(parts) != 3:
+    message = update.message
+    if message is None:
         return
-    _, kind, raw = parts
-    value = _allowed(kind, raw)
-    if value is None:
+    args = [str(part) for part in (context.args or [])]
+    if not args:
+        await _send(message, watch_usage_text())
+        return
+    label = " ".join(args[1:]).strip()[:64] or None
+    await _send(message, await _watch_address(context, args[0], label))
+
+
+async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    args = [str(part) for part in (context.args or [])]
+    if not args:
+        await _send(message, unwatch_usage_text())
+        return
+    await _send(message, await _unwatch_address(context, args[0]))
+
+
+async def _watch_address(
+    context: ContextTypes.DEFAULT_TYPE,
+    address: str,
+    label: str | None,
+) -> str:
+    try:
+        body = WalletCreate(address=address, label=label)
+    except ValidationError:
+        return watch_invalid_text()
+    if _webhook_id(context) is None or context.bot_data.get("helius") is None:
+        return watch_webhook_missing_text()
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    try:
+        async with sessions() as session:
+            async with session.begin():
+                session.add(
+                    TrackedWallet(
+                        address=body.address,
+                        label=body.normalized_label(),
+                        first_seen_at=_clock(context)(),
+                    )
+                )
+                await session.flush()
+                await _add_webhook_address(context, body.address)
+    except IntegrityError:
+        return watch_duplicate_text()
+    except HeliusError:
+        logger.warning("watch_subscribe_failed", address=body.address)
+        return watch_subscribe_failed_text()
+    return watch_saved_text(body.address, body.normalized_label())
+
+
+async def _unwatch_address(context: ContextTypes.DEFAULT_TYPE, address: str) -> str:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    try:
+        async with sessions() as session:
+            async with session.begin():
+                wallet = await session.scalar(
+                    select(TrackedWallet).where(TrackedWallet.address == address)
+                )
+                if wallet is None:
+                    return unwatch_missing_text()
+                trades = await session.scalar(
+                    select(func.count())
+                    .select_from(WalletTx)
+                    .where(WalletTx.wallet_id == wallet.id)
+                )
+                if int(trades or 0) > 0:
+                    return unwatch_blocked_text()
+                if _webhook_id(context) is None or context.bot_data.get("helius") is None:
+                    return watch_webhook_missing_text()
+                await _remove_webhook_address(context, address)
+                await session.delete(wallet)
+    except IntegrityError:
+        return unwatch_blocked_text()
+    except HeliusError:
+        logger.warning("unwatch_unsubscribe_failed", address=address)
+        return unwatch_unsubscribe_failed_text()
+    return unwatch_done_text(address)
+
+
+async def _status_body(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> str | None:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+        if row is None:
+            return None
+        prefs = parse_settings(row.settings)
+        since = _clock(context)() - timedelta(hours=24)
+        alerts_24h = await session.scalar(
+            select(func.count())
+            .select_from(AlertDelivery)
+            .where(AlertDelivery.user_id == row.id, AlertDelivery.sent_at >= since)
+        )
+        min_score = prefs.min_score
+        max_risk = prefs.max_risk
+        active = prefs.active
+    return status_text(
+        min_score=min_score,
+        max_risk=max_risk,
+        active=active,
+        alerts_24h=int(alerts_24h or 0),
+    )
+
+
+async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    message = update.message
+    if message is None:
+        return
+    text, markup = await _wallet_view(context)
+    await _send(message, text, markup)
+
+
+async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    view = await _signal_view(context, 0)
+    if view is None:
+        await _send(message, stale_menu_text())
+        return
+    text, markup = view
+    await _send(message, text, markup)
+
+
+async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    args = [str(part) for part in (context.args or [])]
+    if not args:
+        await _send(message, risk_usage_text())
         return
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    prefs = None
     async with sessions() as session:
-        async with session.begin():
-            row = await session.scalar(select(User).where(User.telegram_id == user.id))
-            if row is not None:
-                row.settings = with_updates(row.settings, **{kind: value})
-                prefs = parse_settings(row.settings)
-    if prefs is None:
-        await query.edit_message_text(unregistered_text())
-        return
-    await query.edit_message_text(
-        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
-        reply_markup=_markup(prefs.min_score, prefs.max_risk),
-    )
+        token = await session.scalar(select(Token).where(Token.mint == args[0]))
+        if token is None or token.risk_score is None:
+            await _send(message, risk_missing_text())
+            return
+        bait_count = int(
+            await session.scalar(
+                select(func.count()).select_from(BaitFlag).where(BaitFlag.token_id == token.id)
+            )
+            or 0
+        )
+        text = risk_card_text(
+            symbol=token.symbol,
+            mint=token.mint,
+            risk_score=token.risk_score,
+            flags=_failed_flags(token),
+            bait_warning=bait_count > 0,
+        )
+    await _send(message, text)
 
 
 def _webhook_id(context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -362,186 +983,6 @@ async def _remove_webhook_address(context: ContextTypes.DEFAULT_TYPE, address: s
     if webhook_id is None or helius is None:
         raise HeliusError("HELIUS_WEBHOOK_ID is not configured")
     await helius.remove_address_from_webhook(webhook_id, address)
-
-
-async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_admin(update, context):
-        return
-    message = update.message
-    if message is None:
-        return
-    args = [str(part) for part in (context.args or [])]
-    if not args:
-        await message.reply_text(watch_usage_text())
-        return
-    label = " ".join(args[1:]).strip()[:64] or None
-    try:
-        body = WalletCreate(address=args[0], label=label)
-    except ValidationError:
-        await message.reply_text(watch_invalid_text())
-        return
-    if _webhook_id(context) is None or context.bot_data.get("helius") is None:
-        await message.reply_text(watch_webhook_missing_text())
-        return
-    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    clock: Clock = context.bot_data["clock"]
-    try:
-        async with sessions() as session:
-            async with session.begin():
-                session.add(
-                    TrackedWallet(
-                        address=body.address,
-                        label=body.normalized_label(),
-                        first_seen_at=clock(),
-                    )
-                )
-                await session.flush()
-                await _add_webhook_address(context, body.address)
-    except IntegrityError:
-        await message.reply_text(watch_duplicate_text())
-        return
-    except HeliusError:
-        logger.warning("watch_subscribe_failed", address=body.address)
-        await message.reply_text(watch_subscribe_failed_text())
-        return
-    await message.reply_text(watch_saved_text(body.address, body.normalized_label()))
-
-
-async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_admin(update, context):
-        return
-    message = update.message
-    if message is None:
-        return
-    args = [str(part) for part in (context.args or [])]
-    if not args:
-        await message.reply_text("Формат: /unwatch адрес")
-        return
-    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    try:
-        async with sessions() as session:
-            async with session.begin():
-                wallet = await session.scalar(
-                    select(TrackedWallet).where(TrackedWallet.address == args[0])
-                )
-                if wallet is None:
-                    await message.reply_text(unwatch_missing_text())
-                    return
-                trades = await session.scalar(
-                    select(func.count())
-                    .select_from(WalletTx)
-                    .where(WalletTx.wallet_id == wallet.id)
-                )
-                if int(trades or 0) > 0:
-                    await message.reply_text(unwatch_blocked_text())
-                    return
-                if _webhook_id(context) is None or context.bot_data.get("helius") is None:
-                    await message.reply_text(watch_webhook_missing_text())
-                    return
-                await _remove_webhook_address(context, args[0])
-                await session.delete(wallet)
-    except IntegrityError:
-        await message.reply_text(unwatch_blocked_text())
-        return
-    except HeliusError:
-        logger.warning("unwatch_unsubscribe_failed", address=args[0])
-        await message.reply_text(unwatch_unsubscribe_failed_text())
-        return
-    await message.reply_text(unwatch_done_text(args[0]))
-
-
-async def _wallets_body(context: ContextTypes.DEFAULT_TYPE) -> str:
-    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    async with sessions() as session:
-        rows = list(
-            await session.scalars(
-                select(TrackedWallet).order_by(TrackedWallet.first_seen_at.desc()).limit(15)
-            )
-        )
-    lines = [f"{row.address}" + (f" — {row.label}" if row.label else "") for row in rows]
-    return wallets_text(lines)
-
-
-async def _signals_body(context: ContextTypes.DEFAULT_TYPE) -> str:
-    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    async with sessions() as session:
-        rows = (
-            await session.execute(
-                select(Signal, Token)
-                .join(Token, Signal.token_id == Token.id)
-                .order_by(Signal.triggered_at.desc(), Signal.id.desc())
-                .limit(8)
-            )
-        ).all()
-    lines = [
-        f"{token.symbol or token.mint[:4]} composite {signal.composite_score} risk {signal.risk_score}"
-        for signal, token in rows
-    ]
-    return signals_text(lines)
-
-
-async def _status_body(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> str | None:
-    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    clock: Clock = context.bot_data["clock"]
-    async with sessions() as session:
-        row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
-        if row is None:
-            return None
-        prefs = parse_settings(row.settings)
-        since = clock() - timedelta(hours=24)
-        alerts_24h = await session.scalar(
-            select(func.count())
-            .select_from(AlertDelivery)
-            .where(
-                AlertDelivery.user_id == row.id,
-                AlertDelivery.sent_at >= since,
-            )
-        )
-    return status_text(
-        min_score=prefs.min_score,
-        max_risk=prefs.max_risk,
-        active=prefs.active,
-        alerts_24h=int(alerts_24h or 0),
-    )
-
-
-async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_admin(update, context):
-        return
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(await _wallets_body(context))
-
-
-async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(await _signals_body(context))
-
-
-async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    args = [str(part) for part in (context.args or [])]
-    if not args:
-        await message.reply_text("Формат: /risk mint")
-        return
-    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
-    async with sessions() as session:
-        token = await session.scalar(select(Token).where(Token.mint == args[0]))
-    if token is None or token.risk_score is None:
-        await message.reply_text(risk_missing_text())
-        return
-    try:
-        report = report_from_token(token)
-    except ValueError:
-        await message.reply_text(risk_missing_text())
-        return
-    flags = [check.name for check in report.checks if check.passed is False]
-    await message.reply_text(risk_text(mint=report.mint, risk_score=report.risk_score, flags=flags))
 
 
 async def _register(
@@ -582,32 +1023,3 @@ async def _prefs_for(
         if row is None:
             return None
         return parse_settings(row.settings)
-
-
-def _markup(min_score: Decimal, max_risk: Decimal) -> InlineKeyboardMarkup:
-    min_row = [
-        InlineKeyboardButton(
-            min_score_label(value, selected=value == min_score),
-            callback_data=f"pref:min_score:{value}",
-        )
-        for value in MIN_SCORE_CHOICES
-    ]
-    max_row = [
-        InlineKeyboardButton(
-            max_risk_label(value, selected=value == max_risk),
-            callback_data=f"pref:max_risk:{value}",
-        )
-        for value in MAX_RISK_CHOICES
-    ]
-    return InlineKeyboardMarkup([min_row, max_row])
-
-
-def _allowed(kind: str, raw: str) -> Decimal | None:
-    try:
-        value = Decimal(raw)
-    except Exception:
-        return None
-    choices = MIN_SCORE_CHOICES if kind == "min_score" else MAX_RISK_CHOICES
-    if kind not in {"min_score", "max_risk"} or value not in choices:
-        return None
-    return value

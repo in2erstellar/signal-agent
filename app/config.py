@@ -177,6 +177,17 @@ ALERT_DISPATCH_INTERVAL_SECONDS = 15
 ALERT_CHAT_INTERVAL_SECONDS = 1
 DEFAULT_MIN_SCORE = Decimal("50")
 DEFAULT_MAX_RISK = Decimal("100")
+SETTINGS_STEP = Decimal("5")
+SIGNAL_PAGE_SIZE = 5
+
+# Shown under signal and risk cards. Not used on menus, settings, or confirmations.
+FOOTER_DISCLAIMER = "Not financial advice. DYOR."
+
+# Danger is 100 - risk_score. risk_score 100 means every known check passed.
+# At or below LOW is green, at or below MED is yellow, above MED is red.
+# A missing risk_score is treated as high danger.
+RISK_ICON_LOW_MAX = Decimal("33")
+RISK_ICON_MED_MAX = Decimal("66")
 MIN_SCORE_CHOICES = (
     Decimal("50"),
     Decimal("60"),

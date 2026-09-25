@@ -20,7 +20,7 @@ from app.adapters.telegram_bot import (
     cmd_unwatch,
     cmd_wallets,
     cmd_watch,
-    on_pref,
+    on_callback,
 )
 from app.db.models import AlertDelivery, Token, TrackedWallet, User
 from app.services.subscriber_settings import parse_settings
@@ -55,6 +55,11 @@ def _context(sessions: object, admins: frozenset[int] | None = None) -> MagicMoc
     return context
 
 
+def _callback_data(call: object) -> set[str]:
+    markup = call.kwargs["reply_markup"]  # type: ignore[attr-defined]
+    return {button.callback_data for row in markup.inline_keyboard for button in row}
+
+
 def _command(telegram_id: int = TELEGRAM_ID) -> MagicMock:
     update = MagicMock()
     update.effective_user.id = telegram_id
@@ -79,10 +84,11 @@ async def test_start_registers_once_and_sends_the_welcome(sessions: object) -> N
     assert prefs.min_score == Decimal("50")
     assert prefs.max_risk == Decimal("100")
     assert prefs.active is True
-    text = update.message.reply_text.await_args_list[-1].args[0]
-    assert text == welcome_text()
-    assert "SignalForge" in text
-    assert DISCLAIMER in text
+    texts = [call.args[0] for call in update.message.reply_text.await_args_list]
+    assert texts[0] == welcome_text()
+    assert "SignalForge" in texts[0]
+    assert DISCLAIMER not in texts[0]
+    assert "m:wallets" in _callback_data(update.message.reply_text.await_args_list[-1])
 
 
 async def test_start_reactivates_a_blocked_user(sessions: object) -> None:
@@ -111,22 +117,24 @@ async def test_settings_buttons_persist_min_score(sessions: object) -> None:
     await cmd_settings(opened, context)
     markup = opened.message.reply_text.await_args.kwargs["reply_markup"]
     labels = [button.text for row in markup.inline_keyboard for button in row]
-    assert any(label.startswith("● min 50") for label in labels)
-    assert any("risk 100" in label for label in labels)
+    assert "− 5" in labels
+    assert "+ 5" in labels
+    assert " 50 " in labels
+    assert " 100 " in labels
 
     chosen = MagicMock()
     chosen.effective_user.id = TELEGRAM_ID
-    chosen.callback_query.data = "pref:min_score:70"
+    chosen.callback_query.data = "set:min:+"
     chosen.callback_query.answer = AsyncMock()
     chosen.callback_query.edit_message_text = AsyncMock()
-    await on_pref(chosen, context)
+    await on_callback(chosen, context)
 
     async with sessions() as session:  # type: ignore[operator]
         row = await session.scalar(select(User).where(User.telegram_id == TELEGRAM_ID))
     assert row is not None
-    assert parse_settings(row.settings).min_score == Decimal("70")
+    assert parse_settings(row.settings).min_score == Decimal("55")
     edited = chosen.callback_query.edit_message_text.await_args.args[0]
-    assert "min_score: 70" in edited
+    assert "Current: 55" in edited
 
 
 async def test_status_counts_deliveries_in_the_last_day(sessions: object) -> None:
@@ -165,13 +173,13 @@ async def test_status_counts_deliveries_in_the_last_day(sessions: object) -> Non
     text = status.message.reply_text.await_args.args[0]
     assert "min_score: 50" in text
     assert "max_risk: 100" in text
-    assert "Алертов за 24 часа: 1" in text
+    assert "Alerts in the last 24 hours: 1" in text
 
 
 async def test_status_without_start_asks_to_register(sessions: object) -> None:
     update = _command()
     await cmd_status(update, _context(sessions))
-    assert update.message.reply_text.await_args.args[0].startswith("Сначала отправьте /start")
+    assert update.message.reply_text.await_args.args[0].startswith("Send /start")
 
 
 def test_admin_ids_parse_a_list_and_reject_junk() -> None:
@@ -198,7 +206,7 @@ async def grant_admin(sessions: object, telegram_id: int = TELEGRAM_ID) -> None:
 async def test_stranger_can_register(sessions: object) -> None:
     update = _command(999)
     await cmd_start(update, _context(sessions))
-    assert update.message.reply_text.await_args.args[0] == user_welcome_text()
+    assert update.message.reply_text.await_args_list[0].args[0] == user_welcome_text()
     async with sessions() as session:  # type: ignore[operator]
         rows = list(await session.scalars(select(User)))
     assert len(rows) == 1
@@ -230,7 +238,7 @@ async def test_watch_lists_and_removes_a_wallet(sessions: object) -> None:
     add = _command()
     context.args = [address, "desk"]
     await cmd_watch(add, context)
-    assert "подписка на Helius активна" in add.message.reply_text.await_args.args[0]
+    assert "Helius subscription is active" in add.message.reply_text.await_args.args[0]
     assert hooks.added == [("wh_test", address)]
 
     listed = _command()
@@ -283,6 +291,7 @@ async def test_signals_and_stored_risk_are_readable(sessions: object) -> None:
     text = signals.message.reply_text.await_args.args[0]
     assert "BONK" in text
     assert "61" in text
+    assert signals.message.reply_text.await_args.kwargs["reply_markup"] is not None
 
     risk = _command()
     context.args = [mint]
@@ -290,7 +299,7 @@ async def test_signals_and_stored_risk_are_readable(sessions: object) -> None:
     body = risk.message.reply_text.await_args.args[0]
     assert "risk_score: 80" in body
     assert "check_lp_lock" in body
-    assert "не значит, что токен безопасен" in body
+    assert "does not mean the token is safe" in body
     async with sessions() as session:  # type: ignore[operator]
         stored = await session.scalar(select(Token).where(Token.mint == mint))
     assert stored is not None
@@ -309,7 +318,7 @@ async def test_alert_text_shows_the_score_the_mint_link_and_the_bait_warning() -
     assert "<b>BONK</b>" in text
     assert "<b>72.5</b>" in text
     assert f"https://solscan.io/token/{mint}" in text
-    assert "EPjF…Dt1v" in text
+    assert "EPjF...Dt1v" in text
     assert "risk_score: 85" in text
     assert "check_funder_cluster_exposure" in text
     assert f"<b>{BAIT_WARNING}</b>" in text

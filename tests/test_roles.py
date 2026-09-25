@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.adapters.telegram_bot import cmd_menu, cmd_start, cmd_wallets, cmd_watch, on_menu
+from app.adapters.telegram_bot import cmd_menu, cmd_start, cmd_wallets, cmd_watch, on_callback
 from app.db.models import TrackedWallet, User
 from app.templates import admin_restricted_text, user_welcome_text
 from tests.pipeline_containers import truncate_pipeline
@@ -45,7 +45,7 @@ async def test_start_registers_a_user_and_is_idempotent(sessions: object) -> Non
     await cmd_start(update, context)
     await cmd_start(update, context)
 
-    text_out = update.message.reply_text.await_args.args[0]
+    text_out = update.message.reply_text.await_args_list[0].args[0]
     assert text_out == user_welcome_text()
     assert "cannot add or remove wallets" in text_out
     assert "/watch" not in text_out
@@ -96,15 +96,15 @@ async def test_menu_hides_wallets_from_users(sessions: object) -> None:
         for row in opened.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard
         for button in row
     }
-    assert "menu:wallets" not in callbacks
-    assert "menu:signals" in callbacks
+    assert "m:wallets" not in callbacks
+    assert "m:signals" in callbacks
 
     pressed = _command(USER_ID)
     pressed.callback_query = MagicMock()
     pressed.callback_query.answer = AsyncMock()
-    pressed.callback_query.data = "menu:wallets"
+    pressed.callback_query.data = "m:wallets"
     pressed.callback_query.edit_message_text = AsyncMock()
-    await on_menu(pressed, context)
+    await on_callback(pressed, context)
     pressed.callback_query.answer.assert_awaited()
     assert pressed.callback_query.edit_message_text.await_args.args[0] == admin_restricted_text()
 
@@ -118,7 +118,7 @@ async def test_menu_shows_wallets_to_admins(sessions: object) -> None:
         for row in opened.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard
         for button in row
     }
-    assert "menu:wallets" in callbacks
+    assert "m:wallets" in callbacks
 
 
 async def test_data_migration_promotes_the_previous_owner_list(pipeline_infra: object) -> None:

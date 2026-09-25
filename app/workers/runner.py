@@ -123,7 +123,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             await stop.wait()
             return
         admins = admin_ids(settings.telegram_admin_ids)
-        application = build_application(token, sessions, admins=admins)
+        application = build_application(token, sessions, admins=admins, redis=redis)
         application.bot_data["helius"] = helius
         application.bot_data["webhook_id"] = settings.helius_webhook_id.strip()
         dispatcher = AlertDispatcher(
