@@ -17,6 +17,8 @@ import structlog
 from app.config import (
     ALERT_DISPATCH_INTERVAL_SECONDS,
     BAIT_POLL_INTERVAL_SECONDS,
+    DISCOVERY_REVIEW_INTERVAL_SECONDS,
+    FUNDER_GRAPH_CONCURRENCY,
     SIGNAL_FUSION_INTERVAL_SECONDS,
     get_settings,
 )
@@ -67,10 +69,17 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     from redis.asyncio import Redis
 
     from app.adapters.helius import HeliusClient
+    from app.adapters.pumpportal import (
+        DISCOVERY_DOWN_MESSAGE,
+        PumpPortalClient,
+        open_pumpportal_socket,
+        pumpportal_ws_url,
+    )
     from app.adapters.raydium import RaydiumPools
     from app.adapters.token_security import HeliusTokenSecurity
     from app.services.funder_graph import FunderGraphBuilder
     from app.services.risk_scanner import RiskScanner
+    from app.workers.token_discovery import TokenDiscovery
 
     settings = get_settings()
     engine = create_engine(settings)
@@ -85,9 +94,45 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     raydium = RaydiumPools(settings.raydium_api_base_url)
     facts = HeliusTokenSecurity(helius, raydium)
     stop = stop or asyncio.Event()
+    graph_slots = asyncio.Semaphore(FUNDER_GRAPH_CONCURRENCY)
+
+    async def notify_discovery_down(text: str = DISCOVERY_DOWN_MESSAGE) -> None:
+        from app.adapters.telegram_bot import admin_ids, telegram_configured
+
+        token = settings.telegram_bot_token.get_secret_value()
+        if not telegram_configured(token):
+            logger.critical("pumpportal_down_no_telegram")
+            return
+        admins = admin_ids(settings.telegram_admin_ids)
+        if not admins:
+            logger.critical("pumpportal_down_no_admins")
+            return
+        from telegram import Bot
+
+        bot = Bot(token)
+        await bot.initialize()
+        try:
+            for chat_id in sorted(admins):
+                try:
+                    await bot.send_message(chat_id=chat_id, text=text)
+                except Exception as exc:
+                    logger.critical(
+                        "pumpportal_down_alert_failed",
+                        chat_id=chat_id,
+                        error_type=type(exc).__name__,
+                    )
+        finally:
+            await bot.shutdown()
+
+    portal = PumpPortalClient(
+        pumpportal_ws_url(settings),
+        opener=open_pumpportal_socket,
+        notifier=notify_discovery_down,
+    )
+    discovery = TokenDiscovery(sessions, redis, helius)
 
     def funder_factory(session: object) -> FunderGraphBuilder:
-        return FunderGraphBuilder(session, helius)  # type: ignore[arg-type]
+        return FunderGraphBuilder(session, helius, semaphore=graph_slots)  # type: ignore[arg-type]
 
     def scanner_factory(session: object, clusters: list[object]) -> RiskScanner:
         del session
@@ -107,6 +152,25 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     async def risk_loop() -> None:
         while not stop.is_set():
             await risk.run_once(block_ms=5000)
+
+    async def discovery_loop() -> None:
+        async for event in portal.iter_events(stop):
+            try:
+                await discovery.ingest_create(event)
+            except Exception as exc:
+                logger.warning(
+                    "token_discovery_ingest_failed",
+                    error_type=type(exc).__name__,
+                )
+
+    async def review_once() -> None:
+        try:
+            await discovery.review_pending()
+        except Exception as exc:
+            logger.warning(
+                "token_discovery_review_failed",
+                error_type=type(exc).__name__,
+            )
 
     async def alerts_loop() -> None:
         from app.adapters.telegram_bot import (
@@ -147,11 +211,14 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         await run_until_stopped(
             stop,
             risk_loop,
+            discovery_loop,
+            lambda: poll_loop(stop, review_once, DISCOVERY_REVIEW_INTERVAL_SECONDS),
             lambda: poll_loop(stop, bait.run_once, BAIT_POLL_INTERVAL_SECONDS),
             lambda: poll_loop(stop, fusion.run_once, SIGNAL_FUSION_INTERVAL_SECONDS),
             alerts_loop,
         )
     finally:
+        await portal.close()
         await helius.aclose()
         await raydium.aclose()
         await redis.aclose()

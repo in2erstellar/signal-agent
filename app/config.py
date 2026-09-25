@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     twitter_bearer_token: SecretStr = Field(default=SecretStr(""))
     environment: Literal["dev", "prod"] = "dev"
     log_level: LogLevel = "INFO"
+    # Optional. subscribeNewToken works without a key. A key is not a license
+    # to open a second socket: PumpPortal bans the extra connection for an hour.
+    pumpportal_api_key: SecretStr = Field(default=SecretStr(""))
+    pumpportal_ws_url: str = "wss://pumpportal.fun/api/data"
 
     @field_validator("database_url")
     @classmethod
@@ -106,6 +110,13 @@ class Settings(BaseSettings):
     def https_base_url(cls, value: str) -> str:
         if not value.startswith("https://"):
             raise ValueError("Service base URLs must start with https://")
+        return value.rstrip("/")
+
+    @field_validator("pumpportal_ws_url")
+    @classmethod
+    def wss_url(cls, value: str) -> str:
+        if not value.startswith("wss://"):
+            raise ValueError("PUMPPORTAL_WS_URL must start with wss://")
         return value.rstrip("/")
 
 
@@ -203,6 +214,34 @@ MAX_RISK_CHOICES = (
 
 if sum(RISK_CHECK_WEIGHTS.values()) != 100:
     raise RuntimeError("RISK_CHECK_WEIGHTS must sum to 100")
+
+# How many AI reviews may start. The daily cap is independent of the hourly
+# one: 10/hour for 24 hours is 240, and 150 must stop the day before that.
+AI_REVIEW_HOURLY_BUDGET = 10
+AI_REVIEW_DAILY_BUDGET = 150
+# Starting band for a review candidate. Change these here, not at the call site.
+AI_REVIEW_MIN_LIQUIDITY = Decimal("5000")
+AI_REVIEW_SCORE_MIN = Decimal("25")
+AI_REVIEW_SCORE_MAX = Decimal("85")
+
+# One process may walk at most this many funder graphs at once.
+FUNDER_GRAPH_CONCURRENCY = 3
+
+# PumpPortal discovery. Holder polls stay bounded; a full pending set is
+# revisited over several cycles instead of one RPC burst per minute.
+DISCOVERY_DOWN_ALERT_SECONDS = 300
+DISCOVERY_PENDING_BATCH = 20
+DISCOVERY_REVIEW_INTERVAL_SECONDS = 30
+DISCOVERY_PENDING_MAX_AGE_HOURS = 24
+
+if AI_REVIEW_DAILY_BUDGET >= AI_REVIEW_HOURLY_BUDGET * 24:
+    raise RuntimeError(
+        "AI_REVIEW_DAILY_BUDGET must bind before 24 consecutive hourly budgets"
+    )
+if FUNDER_GRAPH_CONCURRENCY < 1:
+    raise RuntimeError("FUNDER_GRAPH_CONCURRENCY must be at least 1")
+if DISCOVERY_PENDING_BATCH < 1 or DISCOVERY_REVIEW_INTERVAL_SECONDS <= 0:
+    raise RuntimeError("discovery review batch and interval must be positive")
 
 
 @lru_cache(maxsize=1)

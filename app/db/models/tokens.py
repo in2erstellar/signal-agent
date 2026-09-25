@@ -41,6 +41,15 @@ class Token(Base):
     risk_flags: Mapped[list[Any] | None] = mapped_column(JSONB)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     trace_id: Mapped[str | None] = mapped_column(String)
+    # Pump.fun creates only. NULL means the row did not come from discovery.
+    # pending_first_buy waits for a non-creator holder. qualified is enqueued.
+    # dead is still stored after 24 hours with no such holder.
+    discovery_status: Mapped[str | None] = mapped_column(String)
+    creator_address: Mapped[str | None] = mapped_column(String)
+    bonding_curve_key: Mapped[str | None] = mapped_column(String)
+    # skipped_pre_migration: do not build a funder graph yet.
+    # built: a graph walk finished. NULL: not decided (wallet-discovered rows).
+    funder_graph_status: Mapped[str | None] = mapped_column(String)
 
     transactions: Mapped[list[WalletTx]] = relationship(
         back_populates="token",
@@ -63,5 +72,15 @@ class Token(Base):
         CheckConstraint(
             "risk_score IS NULL OR (risk_score >= 0 AND risk_score <= 100)",
             name="risk_score_range",
+        ),
+        CheckConstraint(
+            "discovery_status IS NULL OR discovery_status IN "
+            "('pending_first_buy', 'qualified', 'dead')",
+            name="discovery_status_values",
+        ),
+        CheckConstraint(
+            "funder_graph_status IS NULL OR funder_graph_status IN "
+            "('skipped_pre_migration', 'built')",
+            name="funder_graph_status_values",
         ),
     )

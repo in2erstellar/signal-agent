@@ -38,6 +38,7 @@ services:
       HELIUS_API_BASE_URL: https://api.helius.xyz
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
+      PUMPPORTAL_API_KEY: ${PUMPPORTAL_API_KEY:-}
       TELEGRAM_BOT_TOKEN: replace-me
       TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
       PUBLIC_API_KEY: ${PUBLIC_API_KEY:-replace-me}
@@ -76,6 +77,7 @@ services:
       HELIUS_API_BASE_URL: https://api.helius.xyz
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
+      PUMPPORTAL_API_KEY: ${PUMPPORTAL_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-replace-me}
       TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
       ANTHROPIC_API_KEY: replace-me

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -180,16 +181,42 @@ class FunderGraphBuilder:
 
     ``build_graph_for_token`` делает flush, но не commit: вызывающий код
     решает, когда фиксировать транзакцию.
+
+    ``getTokenLargestAccounts`` работает для любого SPL mint, не только для
+    AMM. Исключение LP знает только программы Raydium, не bonding curve
+    Pump.fun. Пока живой список холдеров кривой не проверен, pre-migration
+    токены не должны попадать сюда: риск-скан смотрит
+    ``funder_graph_status = skipped_pre_migration`` и не вызывает билдер.
+
+    ``semaphore`` ограничивает число одновременных обходов. Внутри одного
+    обхода запросы к Helius по-прежнему идут по очереди.
     """
 
-    def __init__(self, session: AsyncSession, helius: FundingLookup) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        helius: FundingLookup,
+        *,
+        semaphore: asyncio.Semaphore | None = None,
+    ) -> None:
         self._session = session
         self._helius = helius
+        self._semaphore = semaphore
 
     async def build_graph_for_token(
         self,
         token_mint: str,
         top_n_holders: int = 20,
+    ) -> list[FunderCluster]:
+        if self._semaphore is None:
+            return await self._build_graph_for_token(token_mint, top_n_holders)
+        async with self._semaphore:
+            return await self._build_graph_for_token(token_mint, top_n_holders)
+
+    async def _build_graph_for_token(
+        self,
+        token_mint: str,
+        top_n_holders: int,
     ) -> list[FunderCluster]:
         holders = await self._helius.get_top_holder_owners(token_mint, top_n_holders)
         unique_holders = list(dict.fromkeys(holders))

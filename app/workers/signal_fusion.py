@@ -18,13 +18,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 from sqlalchemy import exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app import config
 from app.config import (
     SIGNAL_BAIT_WEIGHT,
     SIGNAL_RISK_SCAN_MAX_AGE_MINUTES,
@@ -71,6 +72,35 @@ def wallet_score_from_win_rates(win_rates: list[Decimal | None]) -> Decimal:
 
 def wallet_history_known(win_rates: list[Decimal | None]) -> bool:
     return any(rate is not None for rate in win_rates)
+
+
+class AiReviewCandidate(Protocol):
+    liquidity_usd: Decimal | None
+    risk_score: Decimal | None
+
+
+def qualifies_for_ai_review(
+    token: AiReviewCandidate,
+    *,
+    reviews_this_hour: int,
+    reviews_today: int,
+) -> bool:
+    """True only inside the score band, with enough liquidity, and under both caps.
+
+    The daily cap is checked on its own. A quiet hour does not bypass it, and
+    a day that still has room does not bypass the hourly cap.
+    """
+    liquidity = token.liquidity_usd
+    if liquidity is None or liquidity < config.AI_REVIEW_MIN_LIQUIDITY:
+        return False
+    score = token.risk_score
+    if score is None or score < config.AI_REVIEW_SCORE_MIN or score > config.AI_REVIEW_SCORE_MAX:
+        return False
+    if reviews_this_hour >= config.AI_REVIEW_HOURLY_BUDGET:
+        return False
+    if reviews_today >= config.AI_REVIEW_DAILY_BUDGET:
+        return False
+    return True
 
 
 def composite_without_wallet(risk_score: Decimal, bait_flag_penalty: Decimal) -> Decimal:

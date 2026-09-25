@@ -28,9 +28,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import BAIT_CHECK_QUEUE, BAIT_RECHECK_DELAY_MINUTES, RISK_SCAN_QUEUE
-from app.db.models import Token, TrackedWallet, WalletTx
+from app.db.models import TrackedWallet, WalletTx
 from app.observability import bind_trace, new_trace_id, record_webhook
 from app.services.bait_detector import PendingBaitCheck
+from app.services.token_store import insert_token
 from app.workers.queues import bait_member, score_for
 
 logger = structlog.get_logger(__name__)
@@ -145,7 +146,7 @@ class WalletWatcher:
             if wallet is None:
                 skipped += 1
                 continue
-            token, created = await _token_for_mint(session, swap.mint, now)
+            token, created = await insert_token(session, mint=swap.mint, first_seen_at=now)
             inserted = await _insert_tx(session, wallet_id=wallet.id, token_id=token.id, swap=swap)
             if inserted:
                 stored += 1
@@ -388,23 +389,6 @@ def _sol_from_native(tx: dict[str, Any], wallet: str, *, outgoing: bool) -> Deci
         if side == wallet:
             total += _lamports(transfer.get("amount"))
     return total
-
-
-async def _token_for_mint(
-    session: AsyncSession,
-    mint: str,
-    now: datetime,
-) -> tuple[Token, bool]:
-    inserted = await session.scalar(
-        pg_insert(Token)
-        .values(mint=mint, first_seen_at=now)
-        .on_conflict_do_nothing(constraint="uq_tokens_mint")
-        .returning(Token.id)
-    )
-    token = await session.scalar(select(Token).where(Token.mint == mint))
-    if token is None:
-        raise RuntimeError(f"token {mint} was not stored")
-    return token, inserted is not None
 
 
 async def _insert_tx(

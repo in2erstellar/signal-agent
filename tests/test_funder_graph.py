@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -370,3 +371,54 @@ async def test_missing_funding_is_none_and_is_not_retried() -> None:
 
 async def _no_sleep(_delay: float) -> None:
     return None
+
+
+class _GateHolders:
+    """Blocks inside the Helius call so several builds overlap on purpose."""
+
+    def __init__(self) -> None:
+        self.inflight = 0
+        self.max_inflight = 0
+        self.entered = 0
+        self.three_entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get_top_holder_owners(self, mint: str, top_n: int) -> list[str]:
+        del mint, top_n
+        self.inflight += 1
+        self.entered += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        if self.entered >= 3:
+            self.three_entered.set()
+        await self.release.wait()
+        self.inflight -= 1
+        raise RuntimeError("stop")
+
+    async def get_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
+        del wallet_address
+        raise AssertionError("funding lookup must not start before holders return")
+
+
+async def test_funder_graph_semaphore_allows_at_most_three_walks() -> None:
+    """Six overlapping builds must not put more than three holder reads in flight."""
+    helius = _GateHolders()
+    slots = asyncio.Semaphore(3)
+
+    async def walk(index: int) -> None:
+        builder = FunderGraphBuilder(
+            cast(AsyncSession, object()),
+            helius,
+            semaphore=slots,
+        )
+        with pytest.raises(RuntimeError, match="stop"):
+            await builder.build_graph_for_token(f"mint-{index}")
+
+    tasks = [asyncio.create_task(walk(index)) for index in range(6)]
+    await helius.three_entered.wait()
+    await asyncio.sleep(0.05)
+    assert helius.inflight == 3
+    assert helius.max_inflight == 3
+    helius.release.set()
+    await asyncio.gather(*tasks)
+    assert helius.max_inflight <= 3
+    assert helius.entered == 6

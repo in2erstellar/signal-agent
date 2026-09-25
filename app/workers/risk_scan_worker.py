@@ -21,6 +21,7 @@ from app.config import RISK_SCAN_GROUP, RISK_SCAN_QUEUE
 from app.db.models import FunderCluster, Token
 from app.observability import bind_trace, new_trace_id, record_risk_scan_latency
 from app.services.risk_scanner import RiskReport, RiskScanner
+from app.services.token_store import FUNDER_GRAPH_BUILT, FUNDER_GRAPH_SKIPPED
 
 logger = structlog.get_logger(__name__)
 
@@ -106,9 +107,24 @@ class RiskScanWorker:
     async def _scan(self, mint: str, trace_id: str) -> RiskReport:
         async with self._sessions() as session:
             async with session.begin():
-                clusters = await self._funder_factory(session).build_graph_for_token(mint)
-                report = await self._scanner_factory(session, list(clusters)).scan_token(mint)
                 token = await session.scalar(select(Token).where(Token.mint == mint))
+                if token is not None and token.funder_graph_status == FUNDER_GRAPH_SKIPPED:
+                    # Bonding-curve holders were not verified. The curve PDA is
+                    # not a Raydium LP, so a graph walk would treat it as a wallet.
+                    clusters: list[FunderCluster] = []
+                    logger.info(
+                        "funder_graph_skipped",
+                        mint=mint,
+                        reason=FUNDER_GRAPH_SKIPPED,
+                    )
+                else:
+                    clusters = list(
+                        await self._funder_factory(session).build_graph_for_token(mint)
+                    )
+                    token = await session.scalar(select(Token).where(Token.mint == mint))
+                    if token is not None and token.funder_graph_status is None:
+                        token.funder_graph_status = FUNDER_GRAPH_BUILT
+                report = await self._scanner_factory(session, list(clusters)).scan_token(mint)
                 if token is None:
                     token = Token(mint=mint, first_seen_at=report.scanned_at)
                     session.add(token)
