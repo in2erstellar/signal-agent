@@ -272,11 +272,12 @@ MAX_FUNDER_LOOKUP_RETRIES = 2
 FUNDER_LOOKUP_METHOD = "rpc"
 # Newest-first pages of 1000. Stop after this many signatures. Hitting the cap
 # means the oldest funding transfer was not reached, which is not "no funder".
+# Holder wallets from the funded-by 403 sample needed 6k-30k signatures.
 # https://www.helius.dev/docs/billing/credits (2026-09-25): each of
-# getSignaturesForAddress and getTransaction is 1 credit. Paging to this cap
-# is 5 signature calls + 1 getTransaction = 6 credits. A history under 1000
-# signatures is 2 credits. funded-by is 100 credits on the same page.
-MAX_FUNDING_LOOKUP_SIGNATURES = 5000
+# getSignaturesForAddress and getTransaction is 1 credit. A history under
+# 1000 signatures is 2 credits. Paging to this cap is 40 signature calls
+# + 1 getTransaction = 41 credits. funded-by on that page is 100 credits.
+MAX_FUNDING_LOOKUP_SIGNATURES = 40000
 
 # PumpPortal discovery. Holder polls stay bounded; a full pending set is
 # revisited over several cycles instead of one RPC burst per minute.

@@ -93,7 +93,7 @@ async def _no_sleep(_delay: float) -> None:
 
 def test_defaults_use_rpc_and_cap_signatures() -> None:
     assert FUNDER_LOOKUP_METHOD == "rpc"
-    assert MAX_FUNDING_LOOKUP_SIGNATURES == 5000
+    assert MAX_FUNDING_LOOKUP_SIGNATURES == 40000
 
 
 async def test_oldest_signature_on_one_page_is_the_funding_transfer() -> None:
