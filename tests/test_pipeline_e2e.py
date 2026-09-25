@@ -61,7 +61,7 @@ class ScriptedHelius:
     async def get_top_holder_owners(self, mint: str, top_n: int) -> list[str]:
         return HOLDERS[:top_n]
 
-    async def get_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
+    async def find_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
         if wallet_address not in HOLDERS:
             return None
         return FundingInfo(

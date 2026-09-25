@@ -1,16 +1,14 @@
 """Helius client for the first SOL funding transfer and top token holders.
 
-The first incoming SOL transfer is ``GET /v1/wallet/{wallet}/funded-by``
-on the Wallet API (https://www.helius.dev/docs/wallet-api/funded-by).
-One response is the funding transaction. The enhanced address history
-(``/v0/addresses/{address}/transactions``) is newest-first and would require
-paging the whole history, so this client does not use it.
+The default lookup pages standard RPC ``getSignaturesForAddress`` (newest
+first; ``before`` walks toward older signatures) and reads the oldest
+signature with ``getTransaction``. ``GET /v1/wallet/{wallet}/funded-by``
+stays available behind ``FUNDER_LOOKUP_METHOD = helius_funded_by``. That
+Wallet API call is paid: a free-plan key receives HTTP 403.
 
 Top holders come from RPC ``getTokenLargestAccounts`` (at most 20 token
 accounts) plus ``getMultipleAccounts`` to read each account's owner.
 ``getTokenLargestAccounts`` returns token accounts, not wallets.
-
-``funded-by`` is a paid-plan endpoint. A free-plan key receives HTTP 403.
 """
 
 from __future__ import annotations
@@ -21,12 +19,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import structlog
 
-from app.config import Settings
+from app.config import (
+    FUNDER_LOOKUP_METHOD,
+    MAX_FUNDING_LOOKUP_SIGNATURES,
+    Settings,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -34,6 +36,9 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_ATTEMPTS = 3
 # Solana RPC returns at most this many largest token accounts.
 MAX_LARGEST_TOKEN_ACCOUNTS = 20
+# Solana RPC rejects a getSignaturesForAddress limit above this.
+_SIGNATURE_PAGE_LIMIT = 1000
+_LAMPORTS_PER_SOL = Decimal(1_000_000_000)
 _RETRYABLE_STATUS = frozenset({408, 500, 502, 503, 504})
 
 Sleep = Callable[[float], Awaitable[None]]
@@ -51,6 +56,35 @@ class HeliusResponseError(HeliusError):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+class FundingDepthExceeded(HeliusError):
+    """The wallet's history is longer than the signature cap.
+
+    This is not "the wallet was never funded". The oldest transfer was not
+    in the pages we were willing to read.
+    """
+
+    def __init__(self, wallet_address: str, scanned: int) -> None:
+        self.wallet_address = wallet_address
+        self.scanned = scanned
+        super().__init__(
+            f"funding history for {wallet_address} exceeded {scanned} signatures; funder unknown"
+        )
+
+
+class FundingSourceUnresolved(HeliusError):
+    """The oldest transaction did not show a positive SOL inflow.
+
+    Distinct from an empty history, which means the address has no transactions.
+    """
+
+    def __init__(self, wallet_address: str, signature: str, reason: str) -> None:
+        self.wallet_address = wallet_address
+        self.signature = signature
+        super().__init__(
+            f"funding source for {wallet_address} was not in transaction {signature}: {reason}"
+        )
 
 
 @dataclass(frozen=True)
@@ -96,15 +130,27 @@ class HeliusClient:
         timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
         max_attempts: int = MAX_ATTEMPTS,
         sleep: Sleep = asyncio.sleep,
+        funder_lookup_method: str = FUNDER_LOOKUP_METHOD,
+        signature_page_size: int = _SIGNATURE_PAGE_LIMIT,
+        max_funding_signatures: int = MAX_FUNDING_LOOKUP_SIGNATURES,
     ) -> None:
         if not api_key:
             raise ValueError("HELIUS_API_KEY is empty")
+        if funder_lookup_method not in {"rpc", "helius_funded_by"}:
+            raise ValueError("funder_lookup_method must be rpc or helius_funded_by")
+        if not 1 <= signature_page_size <= _SIGNATURE_PAGE_LIMIT:
+            raise ValueError(f"signature_page_size must be 1..{_SIGNATURE_PAGE_LIMIT}")
+        if max_funding_signatures < 1:
+            raise ValueError("max_funding_signatures must be at least 1")
         self._api_key = api_key
         self._api_base_url = api_base_url.rstrip("/")
         self._rpc_url = rpc_url.rstrip("/")
         self._timeout = httpx.Timeout(timeout_seconds)
         self._max_attempts = max_attempts
         self._sleep = sleep
+        self._funder_lookup_method = funder_lookup_method
+        self._signature_page_size = signature_page_size
+        self._max_funding_signatures = max_funding_signatures
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=self._timeout)
 
@@ -209,7 +255,11 @@ class HeliusClient:
         return _parse_webhook(response.json())
 
     async def get_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
-        """Return the wallet's first incoming SOL transfer, or None if it never received SOL."""
+        """Paid Wallet API. HTTP 404 means this address never received SOL.
+
+        Kept so ``FUNDER_LOOKUP_METHOD = helius_funded_by`` can call it without
+        a second implementation. Free-plan keys receive HTTP 403.
+        """
         response = await self._request(
             "GET",
             f"{self._api_base_url}/v1/wallet/{wallet_address}/funded-by",
@@ -223,6 +273,101 @@ class HeliusClient:
                 f"funded-by failed for {wallet_address} with HTTP {response.status_code}",
             )
         return _parse_funding(wallet_address, response.json())
+
+    async def find_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
+        """First incoming SOL transfer, or None when the address has no transactions.
+
+        ``rpc`` pages ``getSignaturesForAddress`` (newest first) to the oldest
+        signature, then one ``getTransaction``. Hitting
+        ``max_funding_signatures`` on a full page raises
+        ``FundingDepthExceeded`` instead of returning None. The paid path
+        delegates to ``get_first_funding_tx``.
+        """
+        if self._funder_lookup_method == "helius_funded_by":
+            return await self.get_first_funding_tx(wallet_address)
+        oldest, scanned = await self._oldest_signature(wallet_address)
+        if oldest is None:
+            logger.info(
+                "funding_lookup_no_history",
+                wallet=wallet_address,
+                signatures_scanned=scanned,
+            )
+            return None
+        signature = str(oldest["signature"])
+        transaction = await self._call_rpc(
+            "getTransaction",
+            [
+                signature,
+                {
+                    "encoding": "jsonParsed",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0,
+                },
+            ],
+        )
+        if not isinstance(transaction, dict):
+            raise FundingSourceUnresolved(wallet_address, signature, "transaction was not found")
+        info = funding_from_transaction(
+            wallet_address,
+            signature,
+            transaction,
+            fallback_block_time=oldest.get("blockTime"),
+        )
+        if info is None:
+            raise FundingSourceUnresolved(
+                wallet_address,
+                signature,
+                "oldest transaction has no positive SOL inflow to this address",
+            )
+        logger.info(
+            "funding_lookup_rpc",
+            wallet=wallet_address,
+            funder=info.funder,
+            signatures_scanned=scanned,
+            signature=signature,
+        )
+        return info
+
+    async def _oldest_signature(
+        self,
+        wallet_address: str,
+    ) -> tuple[Mapping[str, Any] | None, int]:
+        """Last signature after walking newest-first pages, and how many were read.
+
+        Solana returns each page from newest to oldest. ``before`` excludes
+        the signature you pass and continues toward older ones. A short page
+        is the end of history. A full page at the cap is not the first
+        transaction.
+        """
+        collected: list[Mapping[str, Any]] = []
+        before: str | None = None
+        while len(collected) < self._max_funding_signatures:
+            limit = min(self._signature_page_size, self._max_funding_signatures - len(collected))
+            config: dict[str, Any] = {"limit": limit, "commitment": "confirmed"}
+            if before is not None:
+                config["before"] = before
+            result = await self._call_rpc(
+                "getSignaturesForAddress",
+                [wallet_address, config],
+            )
+            page = _signature_rows(result)
+            if not page:
+                break
+            collected.extend(page)
+            if len(page) < limit:
+                break
+            if len(collected) >= self._max_funding_signatures:
+                logger.warning(
+                    "funding_lookup_depth_exceeded",
+                    wallet=wallet_address,
+                    signatures_scanned=len(collected),
+                    limit=self._max_funding_signatures,
+                )
+                raise FundingDepthExceeded(wallet_address, len(collected))
+            before = str(page[-1]["signature"])
+        if not collected:
+            return None, 0
+        return collected[-1], len(collected)
 
     async def get_top_holder_owners(self, mint: str, top_n: int) -> list[str]:
         """Owner wallets of the largest token accounts, largest balance first.
@@ -251,6 +396,13 @@ class HeliusClient:
         return await self._rpc(method, params)
 
     async def _rpc(self, method: str, params: list[Any]) -> dict[str, Any]:
+        result = await self._call_rpc(method, params)
+        if not isinstance(result, dict):
+            raise HeliusResponseError(200, f"{method}: missing result")
+        return result
+
+    async def _call_rpc(self, method: str, params: list[Any]) -> Any:
+        """JSON-RPC result, including a list or null. ``getSignaturesForAddress`` is a list."""
         response = await self._request(
             "POST",
             self._rpc_url,
@@ -264,12 +416,12 @@ class HeliusClient:
             )
         body = response.json()
         if isinstance(body, dict) and body.get("error"):
-            message = body["error"].get("message", "RPC error")
+            error = body["error"]
+            message = error.get("message", "RPC error") if isinstance(error, dict) else str(error)
             raise HeliusResponseError(response.status_code, f"{method}: {message}")
-        result = body.get("result") if isinstance(body, dict) else None
-        if not isinstance(result, dict):
+        if not isinstance(body, dict) or "result" not in body:
             raise HeliusResponseError(response.status_code, f"{method}: missing result")
-        return result
+        return body["result"]
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Try up to ``max_attempts`` times. 429 waits for Retry-After when present."""
@@ -399,6 +551,138 @@ def _owner_from_account(info: Mapping[str, Any] | None) -> str | None:
     if not isinstance(owner, str) or not owner:
         return None
     return owner
+
+
+def _signature_rows(result: Any) -> list[Mapping[str, Any]]:
+    if result is None:
+        return []
+    if not isinstance(result, list):
+        raise HeliusResponseError(200, "getSignaturesForAddress: result is not a list")
+    rows: list[Mapping[str, Any]] = []
+    for item in result:
+        if isinstance(item, dict) and isinstance(item.get("signature"), str) and item["signature"]:
+            rows.append(item)
+    return rows
+
+
+def funding_from_transaction(
+    wallet_address: str,
+    signature: str,
+    transaction: Mapping[str, Any],
+    *,
+    fallback_block_time: Any = None,
+) -> FundingInfo | None:
+    """Sender and lamport gain for ``wallet_address`` in one ``getTransaction`` result.
+
+    None means this transaction did not increase the wallet's SOL balance.
+    The caller decides whether that is an empty history or an unresolved oldest tx.
+    """
+    meta = transaction.get("meta")
+    if not isinstance(meta, dict) or meta.get("err") is not None:
+        return None
+    keys = _transaction_account_keys(transaction)
+    try:
+        index = keys.index(wallet_address)
+    except ValueError:
+        return None
+    pre = _lamport_list(meta.get("preBalances"))
+    post = _lamport_list(meta.get("postBalances"))
+    if index >= len(pre) or index >= len(post):
+        return None
+    gain = post[index] - pre[index]
+    if gain <= 0:
+        return None
+    fee = _lamports(meta.get("fee"))
+    funder = _sol_sender(keys, pre, post, index, gain, fee)
+    if funder is None or funder == wallet_address:
+        return None
+    funded_at = _tx_time(transaction.get("blockTime"), fallback_block_time)
+    if funded_at is None:
+        return None
+    slot_raw = transaction.get("slot")
+    slot = int(slot_raw) if isinstance(slot_raw, int) else None
+    return FundingInfo(
+        wallet_address=wallet_address,
+        funder=funder,
+        amount_sol=Decimal(gain) / _LAMPORTS_PER_SOL,
+        signature=signature,
+        funded_at=funded_at,
+        slot=slot,
+    )
+
+
+def _transaction_account_keys(transaction: Mapping[str, Any]) -> list[str]:
+    message = transaction.get("transaction")
+    if not isinstance(message, dict):
+        return []
+    inner = message.get("message")
+    if not isinstance(inner, dict):
+        return []
+    keys: list[str] = []
+    raw_keys = inner.get("accountKeys")
+    if isinstance(raw_keys, list):
+        for key in raw_keys:
+            if isinstance(key, str) and key:
+                keys.append(key)
+            elif isinstance(key, dict) and isinstance(key.get("pubkey"), str):
+                keys.append(str(key["pubkey"]))
+    meta = transaction.get("meta")
+    loaded = meta.get("loadedAddresses") if isinstance(meta, dict) else None
+    if isinstance(loaded, dict):
+        for bucket in ("writable", "readonly"):
+            extra = loaded.get(bucket)
+            if isinstance(extra, list):
+                keys.extend(item for item in extra if isinstance(item, str) and item)
+    return keys
+
+
+def _lamport_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return [_lamports(item) for item in value]
+
+
+def _lamports(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return cast(int, value)
+
+
+def _sol_sender(
+    keys: Sequence[str],
+    pre: Sequence[int],
+    post: Sequence[int],
+    wallet_index: int,
+    gain: int,
+    fee: int,
+) -> str | None:
+    """Account whose SOL drop matches the wallet's gain, fee included when they paid it."""
+    exact: list[str] = []
+    largest_drop = 0
+    largest_key: str | None = None
+    for index, key in enumerate(keys):
+        if index == wallet_index or index >= len(pre) or index >= len(post):
+            continue
+        drop = pre[index] - post[index]
+        if drop <= 0:
+            continue
+        if drop > largest_drop:
+            largest_drop = drop
+            largest_key = key
+        if drop == gain + fee or drop == gain:
+            exact.append(key)
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return exact[0]
+    return largest_key
+
+
+def _tx_time(block_time: Any, fallback: Any) -> datetime | None:
+    for value in (block_time, fallback):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+    return None
 
 
 def _parse_funding(wallet_address: str, payload: Any) -> FundingInfo:

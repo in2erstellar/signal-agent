@@ -4,8 +4,8 @@ Usage:
     uv run python scripts/manual_test_funder_graph.py <TOKEN_MINT>
 
 Reads HELIUS_API_KEY, HELIUS_API_BASE_URL, HELIUS_RPC_URL and DATABASE_URL
-from the environment or .env. ``funded-by`` requires a paid Helius plan;
-a free key returns HTTP 403.
+from the environment or .env. The default lookup uses standard RPC.
+``FUNDER_LOOKUP_METHOD = helius_funded_by`` calls the paid Wallet API.
 
 This script performs real network calls and writes rows to the database.
 """

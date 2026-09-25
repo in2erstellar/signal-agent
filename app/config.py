@@ -266,6 +266,17 @@ FUNDER_GRAPH_CONCURRENCY = 3
 # Same wallet and the same transient funded-by error. A 403 does not use this
 # counter: the free plan forbids that call, so the lookup is permanent at once.
 MAX_FUNDER_LOOKUP_RETRIES = 2
+# rpc: getSignaturesForAddress + getTransaction on the standard RPC.
+# helius_funded_by: GET /v1/wallet/{address}/funded-by (paid plan, 100 credits).
+# Switch the constant to go back to the paid call. Do not delete that client method.
+FUNDER_LOOKUP_METHOD = "rpc"
+# Newest-first pages of 1000. Stop after this many signatures. Hitting the cap
+# means the oldest funding transfer was not reached, which is not "no funder".
+# https://www.helius.dev/docs/billing/credits (2026-09-25): each of
+# getSignaturesForAddress and getTransaction is 1 credit. Paging to this cap
+# is 5 signature calls + 1 getTransaction = 6 credits. A history under 1000
+# signatures is 2 credits. funded-by is 100 credits on the same page.
+MAX_FUNDING_LOOKUP_SIGNATURES = 5000
 
 # PumpPortal discovery. Holder polls stay bounded; a full pending set is
 # revisited over several cycles instead of one RPC burst per minute.
@@ -300,6 +311,10 @@ if FUNDER_GRAPH_CONCURRENCY < 1:
     raise RuntimeError("FUNDER_GRAPH_CONCURRENCY must be at least 1")
 if MAX_FUNDER_LOOKUP_RETRIES < 1:
     raise RuntimeError("MAX_FUNDER_LOOKUP_RETRIES must be at least 1")
+if FUNDER_LOOKUP_METHOD not in {"rpc", "helius_funded_by"}:
+    raise RuntimeError("FUNDER_LOOKUP_METHOD must be rpc or helius_funded_by")
+if MAX_FUNDING_LOOKUP_SIGNATURES < 1:
+    raise RuntimeError("MAX_FUNDING_LOOKUP_SIGNATURES must be at least 1")
 if DISCOVERY_PENDING_BATCH < 1 or DISCOVERY_REVIEW_INTERVAL_SECONDS <= 0:
     raise RuntimeError("discovery review batch and interval must be positive")
 if DISCOVERY_FRESH_WINDOW_HOURS <= 0:

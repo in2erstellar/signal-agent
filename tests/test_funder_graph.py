@@ -172,7 +172,7 @@ class _FakeHelius:
         self.holder_calls.append((mint, top_n))
         return ["H1", "H2", "H3", "H4", "H5"]
 
-    async def get_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
+    async def find_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
         self.funding_calls.append(wallet_address)
         return self._funding.get(wallet_address)
 
@@ -394,7 +394,7 @@ class _GateHolders:
         self.inflight -= 1
         raise RuntimeError("stop")
 
-    async def get_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
+    async def find_first_funding_tx(self, wallet_address: str) -> FundingInfo | None:
         del wallet_address
         raise AssertionError("funding lookup must not start before holders return")
 

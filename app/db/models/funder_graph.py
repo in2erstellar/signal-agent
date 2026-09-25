@@ -46,6 +46,10 @@ class WalletFunder(Base):
     amount_sol: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     hop_depth: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     funded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Present when the row was stored from a successful first-funding lookup.
+    # A later graph build reads these instead of calling RPC again.
+    funding_signature: Mapped[str | None] = mapped_column(String)
+    funding_slot: Mapped[int | None] = mapped_column(Integer)
 
     __table_args__ = (
         UniqueConstraint(

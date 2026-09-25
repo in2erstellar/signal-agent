@@ -22,7 +22,14 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.helius import FundingInfo, HeliusError, HeliusRateLimitError, HeliusResponseError
+from app.adapters.helius import (
+    FundingDepthExceeded,
+    FundingInfo,
+    FundingSourceUnresolved,
+    HeliusError,
+    HeliusRateLimitError,
+    HeliusResponseError,
+)
 from app.db.models import FunderCluster, Token, WalletFunder
 
 logger = structlog.get_logger(__name__)
@@ -51,7 +58,15 @@ class FunderLookupFailure(Exception):
 
 
 def funder_lookup_failure(wallet_address: str, exc: Exception) -> FunderLookupFailure | None:
-    """Classify a Helius error from ``get_first_funding_tx``. Other errors stay unwrapped."""
+    """Classify a Helius error from a funding lookup. Other errors stay unwrapped."""
+    if isinstance(exc, FundingDepthExceeded | FundingSourceUnresolved):
+        # Same depth or the same oldest transaction will not become a funder on retry.
+        return FunderLookupFailure(
+            wallet_address,
+            status_code=None,
+            permanent=True,
+            message=str(exc),
+        )
     if isinstance(exc, HeliusRateLimitError):
         return FunderLookupFailure(
             wallet_address,
@@ -83,7 +98,7 @@ class FundingLookup(Protocol):
 
     async def get_top_holder_owners(self, mint: str, top_n: int) -> list[str]: ...
 
-    async def get_first_funding_tx(self, wallet_address: str) -> FundingInfo | None: ...
+    async def find_first_funding_tx(self, wallet_address: str) -> FundingInfo | None: ...
 
 # Меньше трёх холдеров — слишком слабый сигнал: общий фандер бывает и у пары
 # обычных кошельков. Порог зафиксирован задачей.
@@ -274,15 +289,22 @@ class FunderGraphBuilder:
 
         async def funding(address: str) -> FundingInfo | None:
             # Один и тот же адрес может быть и холдером, и фандером другого.
-            # Повторный HTTP-вызов ничего нового не скажет: первый SOL не меняется.
+            # Первый SOL не меняется: успешный ответ лежит в wallet_funders
+            # и в кэше этого прогона. Пустая история (None) кэшируется только
+            # на время прогона — кошелёк ещё может получить первый SOL.
             if address not in funding_cache:
-                try:
-                    funding_cache[address] = await self._helius.get_first_funding_tx(address)
-                except Exception as exc:
-                    failure = funder_lookup_failure(address, exc)
-                    if failure is None:
-                        raise
-                    raise failure from exc
+                cached = await self._load_cached_funding(address)
+                if cached is not None:
+                    funding_cache[address] = cached
+                    logger.info("funding_lookup_cache_hit", wallet=address, funder=cached.funder)
+                else:
+                    try:
+                        funding_cache[address] = await self._helius.find_first_funding_tx(address)
+                    except Exception as exc:
+                        failure = funder_lookup_failure(address, exc)
+                        if failure is None:
+                            raise
+                        raise failure from exc
             return funding_cache[address]
 
         hop1: dict[str, FundingInfo] = {}
@@ -335,6 +357,24 @@ class FunderGraphBuilder:
         for funder, info in hop2.items():
             await self._insert_edge(funder, info, hop_depth=2)
 
+    async def _load_cached_funding(self, address: str) -> FundingInfo | None:
+        row = await self._session.scalar(
+            select(WalletFunder)
+            .where(WalletFunder.wallet_address == address)
+            .order_by(WalletFunder.hop_depth.asc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        return FundingInfo(
+            wallet_address=address,
+            funder=row.funder_address,
+            amount_sol=row.amount_sol,
+            signature=row.funding_signature or "",
+            funded_at=row.funded_at,
+            slot=row.funding_slot,
+        )
+
     async def _insert_edge(self, wallet_address: str, info: FundingInfo, hop_depth: int) -> None:
         statement = pg_insert(WalletFunder).values(
             wallet_address=wallet_address,
@@ -342,6 +382,8 @@ class FunderGraphBuilder:
             amount_sol=info.amount_sol,
             hop_depth=hop_depth,
             funded_at=info.funded_at,
+            funding_signature=info.signature or None,
+            funding_slot=info.slot,
         )
         statement = statement.on_conflict_do_nothing(
             constraint="uq_wallet_funders_wallet_funder_hop",

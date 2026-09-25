@@ -41,7 +41,7 @@ class _Helius403:
         del mint, top_n
         return [WALLET]
 
-    async def get_first_funding_tx(self, wallet_address: str) -> None:
+    async def find_first_funding_tx(self, wallet_address: str) -> None:
         raise HeliusResponseError(403, f"funded-by failed for {wallet_address} with HTTP 403")
 
 
@@ -66,8 +66,14 @@ def test_403_is_permanent_and_429_is_transient() -> None:
     assert timed_out.status_code is None
 
 
+class _NoCache:
+    async def scalar(self, statement: object) -> None:
+        del statement
+        return None
+
+
 async def test_builder_wraps_funded_by_403_with_the_wallet() -> None:
-    builder = FunderGraphBuilder(None, _Helius403())  # type: ignore[arg-type]
+    builder = FunderGraphBuilder(_NoCache(), _Helius403())  # type: ignore[arg-type]
     with pytest.raises(FunderLookupFailure) as caught:
         await builder.build_graph_for_token(MINT)
     assert caught.value.wallet_address == WALLET
