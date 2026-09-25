@@ -47,10 +47,15 @@ class Token(Base):
     discovery_status: Mapped[str | None] = mapped_column(String)
     creator_address: Mapped[str | None] = mapped_column(String)
     bonding_curve_key: Mapped[str | None] = mapped_column(String)
+    # PumpPortal vSolInBondingCurve at create, in SOL. Not Raydium TVL and
+    # never copied into liquidity_usd.
+    bonding_curve_liquidity_sol: Mapped[Decimal | None] = mapped_column(Numeric)
     # skipped_pre_migration: bonding curve, graph not built.
     # pending_post_migration: migration event seen, graph not built yet.
     # completed_post_migration: graph built from post-migration holders.
-    # built: wallet-discovered row whose graph finished. NULL: not decided.
+    # built: wallet-discovered row whose graph finished.
+    # failed_permanently: funded-by failed for good (plan 403, or the retry cap).
+    # NULL: not decided.
     funder_graph_status: Mapped[str | None] = mapped_column(String)
     ai_review: Mapped[str | None] = mapped_column(String)
     ai_review_status: Mapped[str | None] = mapped_column(String)
@@ -86,7 +91,7 @@ class Token(Base):
         CheckConstraint(
             "funder_graph_status IS NULL OR funder_graph_status IN "
             "('skipped_pre_migration', 'pending_post_migration', "
-            "'completed_post_migration', 'built')",
+            "'completed_post_migration', 'built', 'failed_permanently')",
             name="funder_graph_status_values",
         ),
         CheckConstraint(

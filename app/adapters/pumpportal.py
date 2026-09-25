@@ -11,7 +11,7 @@ discovery worker reads holders from Helius instead.
 
 Create fields were taken from a live frame: ``txType`` ``create``, ``mint``,
 ``traderPublicKey``, ``bondingCurveKey``, plus optional ``symbol``, ``name``,
-``pool``, ``signature``. A live ``subscribeMigration`` frame used ``txType``
+``pool``, ``signature``, and ``vSolInBondingCurve``. A live ``subscribeMigration`` frame used ``txType``
 ``migrate``, ``mint``, ``signature``, and ``pool`` (``pump-amm``).
 Subscription acknowledgements have ``message`` and no ``mint`` and are ignored.
 """
@@ -24,6 +24,7 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 import structlog
@@ -70,6 +71,8 @@ class NewTokenEvent:
     name: str | None
     symbol: str | None
     pool: str | None
+    # Virtual SOL reserve on the bonding curve at this create. Not AMM TVL.
+    bonding_curve_liquidity_sol: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,7 @@ def parse_new_token(payload: str | Mapping[str, Any]) -> NewTokenEvent | None:
         name=_text(data.get("name")),
         symbol=_text(data.get("symbol")),
         pool=_text(data.get("pool")),
+        bonding_curve_liquidity_sol=_sol_amount(data.get("vSolInBondingCurve")),
     )
 
 
@@ -151,6 +155,21 @@ def _object(payload: str | Mapping[str, Any]) -> dict[str, Any] | None:
     if isinstance(data, dict):
         return data
     return None
+
+
+def _sol_amount(value: Any) -> Decimal | None:
+    """Parse ``vSolInBondingCurve``. Missing or non-numeric stays None."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if not isinstance(value, (int, float, str, Decimal)):
+        return None
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not amount.is_finite() or amount < 0:
+        return None
+    return amount
 
 
 def _text(value: Any) -> str | None:

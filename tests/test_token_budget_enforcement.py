@@ -13,6 +13,7 @@ class _Token:
     def __init__(self) -> None:
         self.liquidity_usd = Decimal("12000")
         self.risk_score = Decimal("50")
+        self.bonding_curve_liquidity_sol = None
 
 
 def test_chars_over_four_is_the_prompt_estimate() -> None:

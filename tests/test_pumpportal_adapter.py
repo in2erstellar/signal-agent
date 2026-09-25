@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from structlog.testing import capture_logs
@@ -93,6 +94,7 @@ def test_parse_live_create_and_ignore_ack() -> None:
         name="The Amazon Monkey",
         symbol="ELIZABETH",
         pool="pump",
+        bonding_curve_liquidity_sol=Decimal("30.097774556784593"),
     )
     assert parse_new_token(LIVE_ACK) is None
     assert parse_new_token('{"txType":"buy","mint":"mint"}') is None

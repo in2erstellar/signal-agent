@@ -8,6 +8,7 @@ and the wallet watcher must not clear discovery columns it did not set.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -22,6 +23,7 @@ FUNDER_GRAPH_SKIPPED = "skipped_pre_migration"
 FUNDER_GRAPH_PENDING_POST = "pending_post_migration"
 FUNDER_GRAPH_COMPLETED_POST = "completed_post_migration"
 FUNDER_GRAPH_BUILT = "built"
+FUNDER_GRAPH_FAILED = "failed_permanently"
 AI_REVIEW_PENDING = "pending"
 AI_REVIEW_COMPLETED = "completed"
 AI_REVIEW_FAILED = "failed"
@@ -38,6 +40,7 @@ async def insert_token(
     name: str | None = None,
     creator_address: str | None = None,
     bonding_curve_key: str | None = None,
+    bonding_curve_liquidity_sol: Decimal | None = None,
     discovery_status: str | None = None,
     funder_graph_status: str | None = None,
 ) -> tuple[Token, bool]:
@@ -50,6 +53,7 @@ async def insert_token(
             name=name,
             creator_address=creator_address,
             bonding_curve_key=bonding_curve_key,
+            bonding_curve_liquidity_sol=bonding_curve_liquidity_sol,
             discovery_status=discovery_status,
             funder_graph_status=funder_graph_status,
         )

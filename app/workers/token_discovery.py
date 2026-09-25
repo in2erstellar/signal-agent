@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.pumpportal import MigrationEvent, NewTokenEvent
 from app.config import (
+    DISCOVERY_FRESH_WINDOW_HOURS,
     DISCOVERY_PENDING_BATCH,
     DISCOVERY_PENDING_MAX_AGE_HOURS,
     RISK_SCAN_QUEUE,
@@ -91,6 +92,7 @@ class TokenDiscovery:
         clock: Clock | None = None,
         pending_batch: int = DISCOVERY_PENDING_BATCH,
         pending_max_age: timedelta | None = None,
+        fresh_window: timedelta | None = None,
     ) -> None:
         self._sessions = sessions
         self._redis = redis
@@ -98,7 +100,11 @@ class TokenDiscovery:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._batch = pending_batch
         self._max_age = pending_max_age or timedelta(hours=DISCOVERY_PENDING_MAX_AGE_HOURS)
-        self._after: tuple[datetime, str] | None = None
+        self._fresh_window = fresh_window or timedelta(hours=DISCOVERY_FRESH_WINDOW_HOURS)
+        # Newest-first cursor inside the fresh window. Cleared when that pass ends.
+        self._fresh_before: tuple[datetime, str] | None = None
+        # Oldest-first cursor for rows older than the fresh window.
+        self._backlog_after: tuple[datetime, str] | None = None
         self.creates = 0
         self.qualified_total = 0
         self.migrations_queued = 0
@@ -117,6 +123,7 @@ class TokenDiscovery:
                     name=event.name,
                     creator_address=event.creator_address,
                     bonding_curve_key=event.bonding_curve_key,
+                    bonding_curve_liquidity_sol=event.bonding_curve_liquidity_sol,
                     discovery_status=DISCOVERY_PENDING,
                     funder_graph_status=FUNDER_GRAPH_SKIPPED,
                 )
@@ -167,7 +174,7 @@ class TokenDiscovery:
     async def review_pending(self) -> ReviewCounts:
         now = self._clock()
         dead = await self._mark_dead(now)
-        batch = await self._next_batch(now)
+        batch, fresh_checked, backlog_checked = await self._next_batch(now)
         qualified = 0
         for item in batch:
             if await self._qualify_if_foreign_buy(item):
@@ -175,6 +182,8 @@ class TokenDiscovery:
         logger.info(
             "token_discovery_review",
             checked=len(batch),
+            fresh_checked=fresh_checked,
+            backlog_checked=backlog_checked,
             qualified=qualified,
             dead=dead,
             creates=self.creates,
@@ -201,44 +210,106 @@ class TokenDiscovery:
             logger.info("token_discovery_marked_dead", count=count)
         return count
 
-    async def _next_batch(self, now: datetime) -> list[_Pending]:
-        cutoff = now - self._max_age
-        async with self._sessions() as session:
-            rows = await self._select_batch(session, cutoff, self._after)
-            if not rows and self._after is not None:
-                self._after = None
-                rows = await self._select_batch(session, cutoff, None)
-            pending = _copy_pending(rows)
-            if len(rows) < self._batch:
-                self._after = None
-            elif rows:
-                last = rows[-1]
-                self._after = (last.first_seen_at, last.mint)
-        return pending
+    async def _next_batch(self, now: datetime) -> tuple[list[_Pending], int, int]:
+        """Fresh window first, then leftover slots for the older backlog.
 
-    async def _select_batch(
+        The live hour checked 1780 oldest pending rows and zero creates from
+        that hour. A second buy, when it happens, is usually in the first
+        minutes, so those creates have to be reached before the tail.
+
+        Newest-first inside the fresh window uses a cursor. A full page does
+        not restart on the same twenty mints. When the page is short or the
+        cursor is exhausted, this cycle does not wrap back to the newest mint:
+        the open slots go to older pending rows, oldest first, so the 24h
+        dead path still moves. The next cycle starts the fresh window again.
+        """
+        dead_cutoff = now - self._max_age
+        fresh_after = now - self._fresh_window
+        fresh_floor = fresh_after if fresh_after > dead_cutoff else dead_cutoff
+        async with self._sessions() as session:
+            fresh_rows = await self._select_window(
+                session,
+                lower_exclusive=fresh_floor,
+                upper_inclusive=None,
+                cursor=self._fresh_before,
+                newest_first=True,
+                limit=self._batch,
+            )
+            if not fresh_rows and self._fresh_before is not None:
+                # End of the fresh pass. Leave this cycle for the backlog.
+                self._fresh_before = None
+            elif len(fresh_rows) < self._batch:
+                self._fresh_before = None
+            else:
+                last = fresh_rows[-1]
+                self._fresh_before = (last.first_seen_at, last.mint)
+
+            need = self._batch - len(fresh_rows)
+            backlog_rows: list[Token] = []
+            if need > 0:
+                backlog_rows = await self._select_window(
+                    session,
+                    lower_exclusive=dead_cutoff,
+                    upper_inclusive=fresh_after,
+                    cursor=self._backlog_after,
+                    newest_first=False,
+                    limit=need,
+                )
+                if not backlog_rows and self._backlog_after is not None:
+                    self._backlog_after = None
+                    backlog_rows = await self._select_window(
+                        session,
+                        lower_exclusive=dead_cutoff,
+                        upper_inclusive=fresh_after,
+                        cursor=None,
+                        newest_first=False,
+                        limit=need,
+                    )
+                if len(backlog_rows) < need:
+                    self._backlog_after = None
+                elif backlog_rows:
+                    last_old = backlog_rows[-1]
+                    self._backlog_after = (last_old.first_seen_at, last_old.mint)
+        pending = _copy_pending([*fresh_rows, *backlog_rows])
+        return pending, len(fresh_rows), len(backlog_rows)
+
+    async def _select_window(
         self,
         session: AsyncSession,
-        cutoff: datetime,
-        after: tuple[datetime, str] | None,
+        *,
+        lower_exclusive: datetime,
+        upper_inclusive: datetime | None,
+        cursor: tuple[datetime, str] | None,
+        newest_first: bool,
+        limit: int,
     ) -> list[Token]:
-        stmt = (
-            select(Token)
-            .where(
-                Token.discovery_status == DISCOVERY_PENDING,
-                Token.first_seen_at > cutoff,
-            )
-            .order_by(Token.first_seen_at.asc(), Token.mint.asc())
-            .limit(self._batch)
+        stmt = select(Token).where(
+            Token.discovery_status == DISCOVERY_PENDING,
+            Token.first_seen_at > lower_exclusive,
         )
-        if after is not None:
-            seen, mint = after
-            stmt = stmt.where(
-                or_(
-                    Token.first_seen_at > seen,
-                    and_(Token.first_seen_at == seen, Token.mint > mint),
+        if upper_inclusive is not None:
+            stmt = stmt.where(Token.first_seen_at <= upper_inclusive)
+        if newest_first:
+            stmt = stmt.order_by(Token.first_seen_at.desc(), Token.mint.desc())
+        else:
+            stmt = stmt.order_by(Token.first_seen_at.asc(), Token.mint.asc())
+        if cursor is not None:
+            seen, mint = cursor
+            if newest_first:
+                stmt = stmt.where(
+                    or_(
+                        Token.first_seen_at < seen,
+                        and_(Token.first_seen_at == seen, Token.mint < mint),
+                    )
                 )
-            )
+            else:
+                stmt = stmt.where(
+                    or_(
+                        Token.first_seen_at > seen,
+                        and_(Token.first_seen_at == seen, Token.mint > mint),
+                    )
+                )
+        stmt = stmt.limit(limit)
         return list(await session.scalars(stmt))
 
     async def _qualify_if_foreign_buy(self, item: _Pending) -> bool:

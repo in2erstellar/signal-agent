@@ -82,6 +82,22 @@ def wallet_history_known(win_rates: list[Decimal | None]) -> bool:
 class AiReviewCandidate(Protocol):
     liquidity_usd: Decimal | None
     risk_score: Decimal | None
+    bonding_curve_liquidity_sol: Decimal | None
+
+
+def _review_liquidity_ok(token: AiReviewCandidate) -> bool:
+    """Post-migration TVL when it is stored, otherwise the bonding-curve SOL snapshot.
+
+    A null ``liquidity_usd`` means the Raydium pool is not there yet. It does
+    not mean the curve is empty. The two thresholds are independent.
+    """
+    liquidity = token.liquidity_usd
+    if liquidity is not None:
+        return liquidity >= config.AI_REVIEW_MIN_LIQUIDITY
+    curve = token.bonding_curve_liquidity_sol
+    if curve is None:
+        return False
+    return curve >= config.AI_REVIEW_MIN_BONDING_CURVE_LIQUIDITY_SOL
 
 
 def qualifies_for_ai_review(
@@ -98,8 +114,7 @@ def qualifies_for_ai_review(
     and a day that still has call room does not bypass the hourly cap or the
     token cap. ``estimated_tokens`` is chars/4 of this review's prompt.
     """
-    liquidity = token.liquidity_usd
-    if liquidity is None or liquidity < config.AI_REVIEW_MIN_LIQUIDITY:
+    if not _review_liquidity_ok(token):
         return False
     score = token.risk_score
     if score is None or score < config.AI_REVIEW_SCORE_MIN or score > config.AI_REVIEW_SCORE_MAX:
@@ -266,6 +281,12 @@ class SignalFusion:
                 reviews_today=day,
                 tokens_today=spent_tokens,
                 estimated_tokens=estimate,
+                liquidity_usd=None if token.liquidity_usd is None else str(token.liquidity_usd),
+                bonding_curve_liquidity_sol=(
+                    None
+                    if token.bonding_curve_liquidity_sol is None
+                    else str(token.bonding_curve_liquidity_sol)
+                ),
             )
             return
         if not await reserve_review(redis, now, tokens=estimate):

@@ -247,12 +247,25 @@ AI_REVIEW_HOURLY_BUDGET = 10
 AI_REVIEW_DAILY_BUDGET = 150
 AI_REVIEW_DAILY_TOKEN_BUDGET = 190_000
 # Starting band for a review candidate. Change these here, not at the call site.
+# AI_REVIEW_MIN_LIQUIDITY is Raydium pool TVL in USD, filled only after AMM
+# migration. It is the wrong gate for a bonding-curve mint.
 AI_REVIEW_MIN_LIQUIDITY = Decimal("5000")
+# Starting gate for pre-migration mints, in SOL, from PumpPortal
+# vSolInBondingCurve. This is not a USD conversion and not an equivalent of
+# the 5000 figure above: there is no SOL price feed in this process, and a
+# create frame's virtual reserve sits near 30 SOL for every new mint. A gate
+# under that cliff means "the create frame carried a curve snapshot". Replace
+# this constant when a different cliff is chosen. Do not copy the value into
+# liquidity_usd.
+AI_REVIEW_MIN_BONDING_CURVE_LIQUIDITY_SOL = Decimal("1")
 AI_REVIEW_SCORE_MIN = Decimal("25")
 AI_REVIEW_SCORE_MAX = Decimal("85")
 
 # One process may walk at most this many funder graphs at once.
 FUNDER_GRAPH_CONCURRENCY = 3
+# Same wallet and the same transient funded-by error. A 403 does not use this
+# counter: the free plan forbids that call, so the lookup is permanent at once.
+MAX_FUNDER_LOOKUP_RETRIES = 2
 
 # PumpPortal discovery. Holder polls stay bounded; a full pending set is
 # revisited over several cycles instead of one RPC burst per minute.
@@ -260,6 +273,9 @@ DISCOVERY_DOWN_ALERT_SECONDS = 300
 DISCOVERY_PENDING_BATCH = 20
 DISCOVERY_REVIEW_INTERVAL_SECONDS = 30
 DISCOVERY_PENDING_MAX_AGE_HOURS = 24
+# Holder checks prefer mints first seen inside this window. Older pending rows
+# take only the batch slots the fresh pass did not fill.
+DISCOVERY_FRESH_WINDOW_HOURS = 1
 
 if AI_REVIEW_DAILY_BUDGET >= AI_REVIEW_HOURLY_BUDGET * 24:
     raise RuntimeError(
@@ -282,8 +298,14 @@ if AI_REVIEW_STALE_HOURS <= 0 or AI_REVIEW_ALERT_WAIT_SECONDS < 0:
     raise RuntimeError("AI review staleness and alert wait must be non-negative")
 if FUNDER_GRAPH_CONCURRENCY < 1:
     raise RuntimeError("FUNDER_GRAPH_CONCURRENCY must be at least 1")
+if MAX_FUNDER_LOOKUP_RETRIES < 1:
+    raise RuntimeError("MAX_FUNDER_LOOKUP_RETRIES must be at least 1")
 if DISCOVERY_PENDING_BATCH < 1 or DISCOVERY_REVIEW_INTERVAL_SECONDS <= 0:
     raise RuntimeError("discovery review batch and interval must be positive")
+if DISCOVERY_FRESH_WINDOW_HOURS <= 0:
+    raise RuntimeError("DISCOVERY_FRESH_WINDOW_HOURS must be positive")
+if AI_REVIEW_MIN_BONDING_CURVE_LIQUIDITY_SOL <= 0:
+    raise RuntimeError("AI_REVIEW_MIN_BONDING_CURVE_LIQUIDITY_SOL must be positive")
 
 
 @lru_cache(maxsize=1)

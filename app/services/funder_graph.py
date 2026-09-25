@@ -22,10 +22,60 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.helius import FundingInfo
+from app.adapters.helius import FundingInfo, HeliusError, HeliusRateLimitError, HeliusResponseError
 from app.db.models import FunderCluster, Token, WalletFunder
 
 logger = structlog.get_logger(__name__)
+
+
+class FunderLookupFailure(Exception):
+    """One wallet's funded-by call failed. The queue decides whether to retry.
+
+    ``permanent`` is true for a plan or client error (HTTP 403 and other 4xx
+    except 429). Retrying those returns the same status. Timeouts and 429 are
+    not permanent: the worker counts them per wallet and per status.
+    """
+
+    def __init__(
+        self,
+        wallet_address: str,
+        *,
+        status_code: int | None,
+        permanent: bool,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.wallet_address = wallet_address
+        self.status_code = status_code
+        self.permanent = permanent
+
+
+def funder_lookup_failure(wallet_address: str, exc: Exception) -> FunderLookupFailure | None:
+    """Classify a Helius error from ``get_first_funding_tx``. Other errors stay unwrapped."""
+    if isinstance(exc, HeliusRateLimitError):
+        return FunderLookupFailure(
+            wallet_address,
+            status_code=429,
+            permanent=False,
+            message=str(exc),
+        )
+    if isinstance(exc, HeliusResponseError):
+        status = exc.status_code
+        permanent = status == 403 or (400 <= status < 500 and status != 429)
+        return FunderLookupFailure(
+            wallet_address,
+            status_code=status,
+            permanent=permanent,
+            message=str(exc),
+        )
+    if isinstance(exc, HeliusError):
+        return FunderLookupFailure(
+            wallet_address,
+            status_code=None,
+            permanent=False,
+            message=str(exc),
+        )
+    return None
 
 
 class FundingLookup(Protocol):
@@ -226,7 +276,13 @@ class FunderGraphBuilder:
             # Один и тот же адрес может быть и холдером, и фандером другого.
             # Повторный HTTP-вызов ничего нового не скажет: первый SOL не меняется.
             if address not in funding_cache:
-                funding_cache[address] = await self._helius.get_first_funding_tx(address)
+                try:
+                    funding_cache[address] = await self._helius.get_first_funding_tx(address)
+                except Exception as exc:
+                    failure = funder_lookup_failure(address, exc)
+                    if failure is None:
+                        raise
+                    raise failure from exc
             return funding_cache[address]
 
         hop1: dict[str, FundingInfo] = {}

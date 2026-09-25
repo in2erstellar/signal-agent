@@ -20,6 +20,7 @@ class _Token:
     def __init__(self, liquidity: Decimal | None, score: Decimal | None) -> None:
         self.liquidity_usd = liquidity
         self.risk_score = score
+        self.bonding_curve_liquidity_sol = None
 
 
 def test_budget_constants_let_the_daily_cap_bind_first() -> None:
