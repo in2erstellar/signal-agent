@@ -19,7 +19,12 @@ DISCOVERY_PENDING = "pending_first_buy"
 DISCOVERY_QUALIFIED = "qualified"
 DISCOVERY_DEAD = "dead"
 FUNDER_GRAPH_SKIPPED = "skipped_pre_migration"
+FUNDER_GRAPH_PENDING_POST = "pending_post_migration"
+FUNDER_GRAPH_COMPLETED_POST = "completed_post_migration"
 FUNDER_GRAPH_BUILT = "built"
+AI_REVIEW_PENDING = "pending"
+AI_REVIEW_COMPLETED = "completed"
+AI_REVIEW_FAILED = "failed"
 
 
 async def insert_token(

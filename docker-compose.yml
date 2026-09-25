@@ -32,19 +32,21 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://signalforge:signalforge@postgres:5432/signalforge
       REDIS_URL: redis://redis:6379/0
-      HELIUS_API_KEY: replace-me
-      HELIUS_WEBHOOK_SECRET: replace-me
+      HELIUS_API_KEY: ${HELIUS_API_KEY:-replace-me}
+      HELIUS_WEBHOOK_SECRET: ${HELIUS_WEBHOOK_SECRET:-replace-me}
       HELIUS_WEBHOOK_ID: ${HELIUS_WEBHOOK_ID:-}
       HELIUS_API_BASE_URL: https://api.helius.xyz
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
       PUMPPORTAL_API_KEY: ${PUMPPORTAL_API_KEY:-}
-      TELEGRAM_BOT_TOKEN: replace-me
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-replace-me}
       TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
       PUBLIC_API_KEY: ${PUBLIC_API_KEY:-replace-me}
       API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-60}
-      ANTHROPIC_API_KEY: replace-me
-      TWITTER_BEARER_TOKEN: replace-me
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-replace-me}
+      TWITTER_BEARER_TOKEN: ${TWITTER_BEARER_TOKEN:-replace-me}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
       ENVIRONMENT: dev
       LOG_LEVEL: INFO
     depends_on:
@@ -71,8 +73,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://signalforge:signalforge@postgres:5432/signalforge
       REDIS_URL: redis://redis:6379/0
-      HELIUS_API_KEY: replace-me
-      HELIUS_WEBHOOK_SECRET: replace-me
+      HELIUS_API_KEY: ${HELIUS_API_KEY:-replace-me}
+      HELIUS_WEBHOOK_SECRET: ${HELIUS_WEBHOOK_SECRET:-replace-me}
       HELIUS_WEBHOOK_ID: ${HELIUS_WEBHOOK_ID:-}
       HELIUS_API_BASE_URL: https://api.helius.xyz
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
@@ -80,8 +82,10 @@ services:
       PUMPPORTAL_API_KEY: ${PUMPPORTAL_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-replace-me}
       TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
-      ANTHROPIC_API_KEY: replace-me
-      TWITTER_BEARER_TOKEN: replace-me
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-replace-me}
+      TWITTER_BEARER_TOKEN: ${TWITTER_BEARER_TOKEN:-replace-me}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
       ENVIRONMENT: dev
       LOG_LEVEL: INFO
     depends_on:

@@ -49,6 +49,7 @@ from app.config import (
 from app.db.models import AlertDelivery, BaitFlag, Signal, Token, TrackedWallet, User, WalletTx
 from app.services.dialog_state import clear_pending_input, get_pending_input, set_pending_input
 from app.services.subscriber_settings import AlertPrefs, parse_settings, with_updates
+from app.services.token_store import AI_REVIEW_COMPLETED
 from app.templates import (
     admin_restricted_text,
     format_score,
@@ -675,18 +676,28 @@ async def _show_signal(
         triggered_at = signal.triggered_at
         risk_score = signal.risk_score if signal.risk_score is not None else token.risk_score
         flags = _failed_flags(token)
-    text = risk_card_text(
-        symbol=symbol,
-        mint=mint,
-        risk_score=risk_score,
-        flags=flags,
-        bait_warning=bait_count > 0,
-        composite_score=composite,
-        triggered_at=triggered_at,
-    )
+        text = risk_card_text(
+            symbol=symbol,
+            mint=mint,
+            risk_score=risk_score,
+            flags=flags,
+            bait_warning=bait_count > 0,
+            composite_score=composite,
+            triggered_at=triggered_at,
+            ai_review=_stored_review(token),
+        )
     back = InlineKeyboardButton("◀️ Back", callback_data=f"s:page:{page}")
     await _edit(query, text, InlineKeyboardMarkup([[back], [_menu_button()]]))
     return True
+
+
+def _stored_review(token: Token) -> str | None:
+    if token.ai_review_status != AI_REVIEW_COMPLETED:
+        return None
+    text = token.ai_review
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return text
 
 
 def _failed_flags(token: Token) -> list[str]:
@@ -957,6 +968,7 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             risk_score=token.risk_score,
             flags=_failed_flags(token),
             bait_warning=bait_count > 0,
+            ai_review=_stored_review(token),
         )
     await _send(message, text)
 

@@ -1,18 +1,19 @@
-"""One PumpPortal websocket for ``subscribeNewToken``.
+"""One PumpPortal websocket for the two free methods.
 
-PumpPortal documents that a second connection is banned for an hour, so
-this process keeps a single live socket and ``connect()`` refuses to open
-another while that socket is still up.
+https://pumpportal.fun/data-api/real-time/ sends ``subscribeNewToken`` and
+``subscribeMigration`` as two JSON messages on the same socket. A second
+connection is banned for an hour, so this process keeps a single live socket
+and ``connect()`` refuses to open another while that socket is still up.
 
-``subscribeTokenTrade`` is metered. This adapter never sends it. Creation
-events do not include later trades; the discovery worker reads holders
-from Helius instead.
+``subscribeTokenTrade`` and ``subscribeAccountTrade`` are metered. This
+adapter never sends them. Creation events do not include later trades; the
+discovery worker reads holders from Helius instead.
 
-The create payload fields used here were taken from a live frame, not from
-a guessed schema: ``txType`` ``create``, ``mint``, ``traderPublicKey``,
-``bondingCurveKey``, plus optional ``symbol``, ``name``, ``pool``,
-``signature``. The subscription acknowledgement has ``message`` and no
-``txType`` and is ignored.
+Create fields were taken from a live frame: ``txType`` ``create``, ``mint``,
+``traderPublicKey``, ``bondingCurveKey``, plus optional ``symbol``, ``name``,
+``pool``, ``signature``. A live ``subscribeMigration`` frame used ``txType``
+``migrate``, ``mint``, ``signature``, and ``pool`` (``pump-amm``).
+Subscription acknowledgements have ``message`` and no ``mint`` and are ignored.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from app.config import DISCOVERY_DOWN_ALERT_SECONDS, Settings
 logger = structlog.get_logger(__name__)
 
 SUBSCRIBE_NEW_TOKEN = {"method": "subscribeNewToken"}
+SUBSCRIBE_MIGRATION = {"method": "subscribeMigration"}
 DISCOVERY_DOWN_MESSAGE = (
     "Discovery stream is down: PumpPortal has been disconnected for more than 5 minutes."
 )
@@ -70,6 +72,16 @@ class NewTokenEvent:
     pool: str | None
 
 
+@dataclass(frozen=True)
+class MigrationEvent:
+    """A mint that left the bonding curve. Holders must be read again after this."""
+
+    mint: str
+    signature: str | None
+    pool: str | None
+    tx_type: str
+
+
 def pumpportal_ws_url(settings: Settings) -> str:
     """Base socket URL. An API key is appended only when one is configured."""
     base = settings.pumpportal_ws_url
@@ -82,16 +94,8 @@ def pumpportal_ws_url(settings: Settings) -> str:
 
 def parse_new_token(payload: str | Mapping[str, Any]) -> NewTokenEvent | None:
     """Return a create event, or None for acks and any other frame."""
-    if isinstance(payload, str):
-        try:
-            data: Any = json.loads(payload)
-        except json.JSONDecodeError:
-            return None
-    else:
-        data = payload
-    if not isinstance(data, dict):
-        return None
-    if data.get("txType") != "create":
+    data = _object(payload)
+    if data is None or data.get("txType") != "create":
         return None
     mint = _text(data.get("mint"))
     creator = _text(data.get("traderPublicKey"))
@@ -109,10 +113,61 @@ def parse_new_token(payload: str | Mapping[str, Any]) -> NewTokenEvent | None:
     )
 
 
+def parse_migration(payload: str | Mapping[str, Any]) -> MigrationEvent | None:
+    """Return a migration event.
+
+    ``txType`` ``migrate`` is the value from a live ``subscribeMigration``
+    frame. Acks and creates return None.
+    """
+    data = _object(payload)
+    if data is None:
+        return None
+    tx_type = _text(data.get("txType"))
+    if tx_type not in _MIGRATION_TX_TYPES:
+        return None
+    mint = _text(data.get("mint"))
+    if mint is None:
+        return None
+    return MigrationEvent(
+        mint=mint,
+        signature=_text(data.get("signature")),
+        pool=_text(data.get("pool")),
+        tx_type=tx_type,
+    )
+
+
+# Observed on a live subscribeMigration frame. Do not add values that were not seen.
+_MIGRATION_TX_TYPES: frozenset[str] = frozenset({"migrate"})
+
+
+def _object(payload: str | Mapping[str, Any]) -> dict[str, Any] | None:
+    if isinstance(payload, str):
+        try:
+            data: Any = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    else:
+        data = payload
+    if isinstance(data, dict):
+        return data
+    return None
+
+
 def _text(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value
     return None
+
+
+def _is_ack(raw: str) -> bool:
+    data = _object(raw)
+    return data is not None and "message" in data and "mint" not in data
+
+
+def _clip(raw: str) -> str:
+    if len(raw) <= 2000:
+        return raw
+    return raw[:2000]
 
 
 class _WebsocketsTransport:
@@ -203,6 +258,7 @@ class PumpPortalClient:
         try:
             socket = await self._opener(self._url)
             await socket.send(json.dumps(SUBSCRIBE_NEW_TOKEN))
+            await socket.send(json.dumps(SUBSCRIBE_MIGRATION))
         except Exception:
             if socket is not None:
                 await _close_quietly(socket)
@@ -215,8 +271,10 @@ class PumpPortalClient:
     async def close(self) -> None:
         await self._drop_socket()
 
-    async def iter_events(self, stop: asyncio.Event) -> AsyncIterator[NewTokenEvent]:
-        """Yield create events until ``stop`` is set. Reconnects on failure."""
+    async def iter_events(
+        self, stop: asyncio.Event
+    ) -> AsyncIterator[NewTokenEvent | MigrationEvent]:
+        """Yield create and migration events until ``stop`` is set."""
         backoff = self._initial_backoff
         try:
             while not stop.is_set():
@@ -228,9 +286,16 @@ class PumpPortalClient:
                         if raw is None:
                             return
                         self._mark_recovered()
-                        event = parse_new_token(raw)
-                        if event is not None:
-                            yield event
+                        created = parse_new_token(raw)
+                        if created is not None:
+                            yield created
+                            continue
+                        migrated = parse_migration(raw)
+                        if migrated is not None:
+                            yield migrated
+                            continue
+                        if not _is_ack(raw):
+                            logger.info("pumpportal_unparsed", payload=_clip(raw))
                 except PumpPortalAlreadyConnected:
                     raise
                 except asyncio.CancelledError:

@@ -126,6 +126,7 @@ def alert_text(
     risk_score: Decimal | None,
     risk_flags: list[str],
     bait_warning: bool,
+    ai_review: str | None = None,
 ) -> str:
     flags = ", ".join(escape(flag) for flag in risk_flags) if risk_flags else "none"
     risk = "—" if risk_score is None else format_score(risk_score)
@@ -139,6 +140,7 @@ def alert_text(
     ]
     if bait_warning:
         lines.extend(["", f"<b>{BAIT_WARNING}</b>"])
+    lines.extend(_review_lines(ai_review))
     lines.extend(["", DISCLAIMER])
     return "\n".join(lines)
 
@@ -152,6 +154,7 @@ def risk_card_text(
     bait_warning: bool,
     composite_score: Decimal | None = None,
     triggered_at: datetime | None = None,
+    ai_review: str | None = None,
 ) -> str:
     listed = ", ".join(escape(flag) for flag in flags) if flags else "none"
     risk = "—" if risk_score is None else format_score(risk_score)
@@ -172,8 +175,15 @@ def risk_card_text(
     )
     if bait_warning:
         lines.extend(["", f"<b>{BAIT_WARNING}</b>"])
+    lines.extend(_review_lines(ai_review))
     lines.extend(["", DISCLAIMER])
     return "\n".join(lines)
+
+
+def _review_lines(ai_review: str | None) -> list[str]:
+    if not ai_review or not ai_review.strip():
+        return []
+    return ["", "<b>AI review</b>", escape(ai_review.strip())]
 
 
 def signal_row(symbol: str | None, composite: Decimal, when: datetime) -> str:

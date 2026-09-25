@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import structlog
 
 from app.config import (
+    AI_REVIEW_PROVIDER,
     ALERT_DISPATCH_INTERVAL_SECONDS,
     BAIT_POLL_INTERVAL_SECONDS,
     DISCOVERY_REVIEW_INTERVAL_SECONDS,
@@ -68,9 +69,12 @@ async def run_until_stopped(
 async def serve(stop: asyncio.Event | None = None) -> None:
     from redis.asyncio import Redis
 
+    from app.adapters.ai_review import AiReviewClient, ai_review_configured
     from app.adapters.helius import HeliusClient
     from app.adapters.pumpportal import (
         DISCOVERY_DOWN_MESSAGE,
+        MigrationEvent,
+        NewTokenEvent,
         PumpPortalClient,
         open_pumpportal_socket,
         pumpportal_ws_url,
@@ -79,6 +83,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     from app.adapters.token_security import HeliusTokenSecurity
     from app.services.funder_graph import FunderGraphBuilder
     from app.services.risk_scanner import RiskScanner
+    from app.workers.ai_review_worker import AiReviewWorker
     from app.workers.token_discovery import TokenDiscovery
 
     settings = get_settings()
@@ -145,9 +150,26 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             lambda: datetime.now(timezone.utc),
         )
 
+    helius_key = settings.helius_api_key.get_secret_value().strip()
+    logger.info(
+        "helius_configured",
+        configured=bool(helius_key) and helius_key != "replace-me",
+    )
+    logger.info(
+        "ai_review_configured",
+        configured=ai_review_configured(settings),
+        provider=AI_REVIEW_PROVIDER,
+    )
+    reviews = AiReviewClient.from_settings(settings)
     risk = RiskScanWorker(sessions, redis, funder_factory, scanner_factory, stop=stop)
     bait = BaitCheckWorker(sessions, redis, detector_factory, stop=stop)
-    fusion = SignalFusion(sessions, stop=stop)
+    fusion = SignalFusion(
+        sessions,
+        redis,
+        reviews_enabled=ai_review_configured(settings),
+        stop=stop,
+    )
+    ai_reviews = AiReviewWorker(sessions, redis, reviews, stop=stop)
 
     async def risk_loop() -> None:
         while not stop.is_set():
@@ -156,12 +178,19 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     async def discovery_loop() -> None:
         async for event in portal.iter_events(stop):
             try:
-                await discovery.ingest_create(event)
+                if isinstance(event, NewTokenEvent):
+                    await discovery.ingest_create(event)
+                elif isinstance(event, MigrationEvent):
+                    await discovery.handle_migration(event)
             except Exception as exc:
                 logger.warning(
                     "token_discovery_ingest_failed",
                     error_type=type(exc).__name__,
                 )
+
+    async def ai_review_loop() -> None:
+        while not stop.is_set():
+            await ai_reviews.run_once(block_ms=5000)
 
     async def review_once() -> None:
         try:
@@ -215,9 +244,11 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             lambda: poll_loop(stop, review_once, DISCOVERY_REVIEW_INTERVAL_SECONDS),
             lambda: poll_loop(stop, bait.run_once, BAIT_POLL_INTERVAL_SECONDS),
             lambda: poll_loop(stop, fusion.run_once, SIGNAL_FUSION_INTERVAL_SECONDS),
+            ai_review_loop,
             alerts_loop,
         )
     finally:
+        await reviews.aclose()
         await portal.close()
         await helius.aclose()
         await raydium.aclose()

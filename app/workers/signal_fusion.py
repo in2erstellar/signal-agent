@@ -21,12 +21,14 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Protocol
 
 import structlog
+from redis.asyncio import Redis
 from sqlalchemy import exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import config
 from app.config import (
+    AI_REVIEW_QUEUE,
     SIGNAL_BAIT_WEIGHT,
     SIGNAL_RISK_SCAN_MAX_AGE_MINUTES,
     SIGNAL_RISK_WEIGHT,
@@ -35,6 +37,8 @@ from app.config import (
 )
 from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace
+from app.services.ai_budget import release_review, reserve_review, review_counts
+from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING
 
 logger = structlog.get_logger(__name__)
 
@@ -116,11 +120,15 @@ class SignalFusion:
     def __init__(
         self,
         sessions: async_sessionmaker[AsyncSession],
+        redis: Redis | None = None,
         *,
+        reviews_enabled: bool = False,
         clock: Clock | None = None,
         stop: Any | None = None,
     ) -> None:
         self._sessions = sessions
+        self._redis = redis
+        self._reviews_enabled = reviews_enabled and redis is not None
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._stop = stop
 
@@ -224,4 +232,52 @@ class SignalFusion:
                     wallet_score=str(wallet_score) if wallet_score is not None else None,
                     bait_flag_penalty=str(penalty or 0),
                 )
+            await self._enqueue_review(token, now)
         return inserted
+
+    async def _enqueue_review(self, token: Token, now: datetime) -> None:
+        redis = self._redis
+        if not self._reviews_enabled or redis is None:
+            return
+        if token.ai_review_status == AI_REVIEW_PENDING:
+            return
+        if _review_is_fresh(token, now):
+            return
+        hour, day = await review_counts(redis, now)
+        if not qualifies_for_ai_review(token, reviews_this_hour=hour, reviews_today=day):
+            logger.info(
+                "ai_review_skipped",
+                mint=token.mint,
+                reviews_this_hour=hour,
+                reviews_today=day,
+            )
+            return
+        if not await reserve_review(redis, now):
+            logger.info("ai_review_budget_exhausted", mint=token.mint)
+            return
+        token.ai_review_status = AI_REVIEW_PENDING
+        try:
+            await redis.xadd(
+                AI_REVIEW_QUEUE,
+                {
+                    "mint": token.mint,
+                    "trace_id": token.trace_id or "",
+                    "reserved_at": now.isoformat(),
+                },
+            )
+        except Exception:
+            await release_review(redis, now)
+            token.ai_review_status = None
+            raise
+        logger.info("ai_review_enqueued", mint=token.mint, trace_id=token.trace_id)
+
+
+def _review_is_fresh(token: Token, now: datetime) -> bool:
+    if token.ai_review_status != AI_REVIEW_COMPLETED or not token.ai_review:
+        return False
+    reviewed = token.ai_review_at
+    if reviewed is None:
+        return False
+    if reviewed.tzinfo is None:
+        reviewed = reviewed.replace(tzinfo=timezone.utc)
+    return reviewed >= now - timedelta(hours=config.AI_REVIEW_STALE_HOURS)

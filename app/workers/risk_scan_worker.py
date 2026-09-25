@@ -21,7 +21,12 @@ from app.config import RISK_SCAN_GROUP, RISK_SCAN_QUEUE
 from app.db.models import FunderCluster, Token
 from app.observability import bind_trace, new_trace_id, record_risk_scan_latency
 from app.services.risk_scanner import RiskReport, RiskScanner
-from app.services.token_store import FUNDER_GRAPH_BUILT, FUNDER_GRAPH_SKIPPED
+from app.services.token_store import (
+    FUNDER_GRAPH_BUILT,
+    FUNDER_GRAPH_COMPLETED_POST,
+    FUNDER_GRAPH_PENDING_POST,
+    FUNDER_GRAPH_SKIPPED,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -108,7 +113,8 @@ class RiskScanWorker:
         async with self._sessions() as session:
             async with session.begin():
                 token = await session.scalar(select(Token).where(Token.mint == mint))
-                if token is not None and token.funder_graph_status == FUNDER_GRAPH_SKIPPED:
+                prior = token.funder_graph_status if token is not None else None
+                if prior == FUNDER_GRAPH_SKIPPED:
                     # Bonding-curve holders were not verified. The curve PDA is
                     # not a Raydium LP, so a graph walk would treat it as a wallet.
                     clusters: list[FunderCluster] = []
@@ -118,16 +124,26 @@ class RiskScanWorker:
                         reason=FUNDER_GRAPH_SKIPPED,
                     )
                 else:
+                    # build_graph_for_token calls getTokenLargestAccounts now.
+                    # Post-migration scans must not reuse a pre-migration list.
                     clusters = list(
                         await self._funder_factory(session).build_graph_for_token(mint)
                     )
                     token = await session.scalar(select(Token).where(Token.mint == mint))
-                    if token is not None and token.funder_graph_status is None:
+                    if token is not None and prior == FUNDER_GRAPH_PENDING_POST:
+                        token.funder_graph_status = FUNDER_GRAPH_COMPLETED_POST
+                        logger.info(
+                            "funder_graph_completed_post_migration",
+                            mint=mint,
+                        )
+                    elif token is not None and prior is None:
                         token.funder_graph_status = FUNDER_GRAPH_BUILT
                 report = await self._scanner_factory(session, list(clusters)).scan_token(mint)
                 if token is None:
                     token = Token(mint=mint, first_seen_at=report.scanned_at)
                     session.add(token)
+                if report.liquidity_usd is not None:
+                    token.liquidity_usd = report.liquidity_usd
                 token.risk_score = Decimal(report.risk_score)
                 token.risk_flags = _risk_flags(report)
                 token.mint_authority_renounced = _passed(report, "check_mint_authority")

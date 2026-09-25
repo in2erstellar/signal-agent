@@ -13,6 +13,7 @@ SPL ``burn`` that only shrinks supply is not visible here.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from app.adapters.helius import HeliusClient, HeliusResponseError
@@ -68,6 +69,7 @@ class LpBook:
     lp_mint: str | None
     supply_raw: int | None
     rows: list[LpHolderRow]
+    liquidity_usd: Decimal | None = None
 
 
 class HeliusTokenSecurity:
@@ -114,9 +116,9 @@ class HeliusTokenSecurity:
         return HolderBook(supply_raw=mint_view.supply_raw, rows=rows)
 
     async def lp_book(self, mint: str) -> LpBook:
-        lp_mint = await self._raydium.lp_mint_for_token(mint)
+        lp_mint, liquidity_usd = await self._raydium.top_pool(mint)
         if lp_mint is None:
-            return LpBook(lp_mint=None, supply_raw=None, rows=[])
+            return LpBook(lp_mint=None, supply_raw=None, rows=[], liquidity_usd=liquidity_usd)
         lp_account = _mint_view(await self._parsed_account(lp_mint))
         largest = await self._helius.rpc("getTokenLargestAccounts", [lp_mint])
         accounts = [
@@ -125,7 +127,12 @@ class HeliusTokenSecurity:
             if isinstance(item, dict) and item.get("address") and item.get("amount") is not None
         ]
         if not accounts:
-            return LpBook(lp_mint=lp_mint, supply_raw=lp_account.supply_raw, rows=[])
+            return LpBook(
+                lp_mint=lp_mint,
+                supply_raw=lp_account.supply_raw,
+                rows=[],
+                liquidity_usd=liquidity_usd,
+            )
         addresses = [str(item["address"]) for item in accounts]
         parsed = await self._helius.rpc(
             "getMultipleAccounts",
@@ -146,7 +153,12 @@ class HeliusTokenSecurity:
                     is_lock_program=program in LOCK_PROGRAMS,
                 )
             )
-        return LpBook(lp_mint=lp_mint, supply_raw=lp_account.supply_raw, rows=rows)
+        return LpBook(
+            lp_mint=lp_mint,
+            supply_raw=lp_account.supply_raw,
+            rows=rows,
+            liquidity_usd=liquidity_usd,
+        )
 
     async def _parsed_account(self, address: str) -> dict[str, Any]:
         result = await self._helius.rpc(

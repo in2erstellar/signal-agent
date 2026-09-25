@@ -40,6 +40,10 @@ async def test_metrics_lists_webhook_alert_scan_and_queues() -> None:
     assert "signalforge_alerts_sent_total" in body
     assert "signalforge_risk_scan_latency_seconds" in body
     assert "signalforge_redis_queue_size" in body
+    assert "signalforge_ai_review_calls_last_hour" in body
+    assert "signalforge_ai_review_calls_last_day" in body
+    assert "signalforge_ai_review_budget_remaining_hour" in body
+    assert "signalforge_ai_review_budget_remaining_day" in body
 
 
 def test_bind_trace_merges_into_the_log_event() -> None:

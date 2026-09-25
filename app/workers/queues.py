@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.config import BAIT_CHECK_QUEUE, RISK_SCAN_GROUP, RISK_SCAN_QUEUE
+from app.config import (
+    AI_REVIEW_GROUP,
+    AI_REVIEW_QUEUE,
+    BAIT_CHECK_QUEUE,
+    RISK_SCAN_GROUP,
+    RISK_SCAN_QUEUE,
+)
 from app.services.bait_detector import PendingBaitCheck
 
 __all__ = [
+    "AI_REVIEW_GROUP",
+    "AI_REVIEW_QUEUE",
     "BAIT_CHECK_QUEUE",
     "RISK_SCAN_GROUP",
     "RISK_SCAN_QUEUE",

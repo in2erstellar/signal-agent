@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
@@ -22,9 +22,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import Forbidden, TelegramError
 
+from app.config import AI_REVIEW_ALERT_WAIT_SECONDS
 from app.db.models import AlertDelivery, BaitFlag, Signal, Token, User
 from app.observability import bind_trace, record_alert_sent
 from app.services.subscriber_settings import accepts_alert, parse_settings, with_updates
+from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING
 from app.templates import alert_text
 
 logger = structlog.get_logger(__name__)
@@ -51,6 +53,8 @@ class _Snapshot:
     risk_score: Decimal | None
     risk_flags: list[str]
     bait_warning: bool
+    ai_review: str | None
+    defer: bool
     trace_id: str | None
     recipients: list[_Recipient]
 
@@ -112,6 +116,9 @@ class AlertDispatcher:
         snapshot = await self._load(signal_id)
         if snapshot is None:
             return _Outcome(0, 0)
+        if snapshot.defer:
+            logger.info("alert_waiting_for_ai_review", signal_id=str(signal_id), mint=snapshot.mint)
+            return _Outcome(0, 0)
         sent = 0
         failed = 0
         delivered: list[UUID] = []
@@ -123,6 +130,7 @@ class AlertDispatcher:
             risk_score=snapshot.risk_score,
             risk_flags=snapshot.risk_flags,
             bait_warning=snapshot.bait_warning,
+            ai_review=snapshot.ai_review,
         )
         with bind_trace(snapshot.trace_id):
             for recipient in snapshot.recipients:
@@ -191,6 +199,13 @@ class AlertDispatcher:
                     continue
                 recipients.append(_Recipient(user.id, user.telegram_id))
             flags = token.risk_flags if isinstance(token.risk_flags, list) else []
+            review = _completed_review(token)
+            waiting = (
+                review is None
+                and token.ai_review_status == AI_REVIEW_PENDING
+                and signal.triggered_at
+                >= self._clock() - timedelta(seconds=AI_REVIEW_ALERT_WAIT_SECONDS)
+            )
             return _Snapshot(
                 signal_id=signal.id,
                 symbol=token.symbol,
@@ -199,6 +214,8 @@ class AlertDispatcher:
                 risk_score=signal.risk_score,
                 risk_flags=[str(flag) for flag in flags],
                 bait_warning=bool(bait_count),
+                ai_review=review,
+                defer=waiting,
                 trace_id=signal.trace_id,
                 recipients=recipients,
             )
@@ -228,6 +245,15 @@ class AlertDispatcher:
                     await session.execute(
                         update(Signal).where(Signal.id == signal_id).values(notified=True)
                     )
+
+
+def _completed_review(token: Token) -> str | None:
+    if token.ai_review_status != AI_REVIEW_COMPLETED:
+        return None
+    text = token.ai_review
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return text
 
 
 def _stopped(stop: object | None) -> bool:

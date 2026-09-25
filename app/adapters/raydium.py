@@ -7,6 +7,7 @@ https://docs.raydium.io/reference/program-addresses points at
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -37,6 +38,11 @@ class RaydiumPools:
 
     async def lp_mint_for_token(self, mint: str) -> str | None:
         """LP mint of the highest-liquidity pool that includes ``mint``, if any."""
+        lp_mint, _tvl = await self.top_pool(mint)
+        return lp_mint
+
+    async def top_pool(self, mint: str) -> tuple[str | None, Decimal | None]:
+        """LP mint and USD TVL of the top pool, from the same response."""
         response = await self._client.get(
             f"{self._base_url}/pools/info/mint",
             params={
@@ -51,11 +57,20 @@ class RaydiumPools:
         )
         if response.status_code != 200:
             raise RaydiumError(f"Raydium pool lookup failed with HTTP {response.status_code}")
-        payload = response.json()
-        return _lp_mint(payload)
+        pool = _first_pool(response.json())
+        if pool is None:
+            return None, None
+        return _lp_address(pool), _tvl_usd(pool)
 
 
 def _lp_mint(payload: Any) -> str | None:
+    pool = _first_pool(payload)
+    if pool is None:
+        return None
+    return _lp_address(pool)
+
+
+def _first_pool(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or payload.get("success") is False:
         raise RaydiumError("Raydium pool lookup returned an error payload")
     data = payload.get("data")
@@ -66,9 +81,26 @@ def _lp_mint(payload: Any) -> str | None:
         return None
     if not isinstance(pools, list):
         raise RaydiumError("Raydium pool list has an unexpected shape")
-    lp_mint = pools[0].get("lpMint") if isinstance(pools[0], dict) else None
+    pool = pools[0]
+    if not isinstance(pool, dict):
+        raise RaydiumError("Raydium pool list has an unexpected shape")
+    return pool
+
+
+def _lp_address(pool: dict[str, Any]) -> str:
+    lp_mint = pool.get("lpMint")
     if isinstance(lp_mint, dict) and isinstance(lp_mint.get("address"), str):
         return str(lp_mint["address"])
     if isinstance(lp_mint, str) and lp_mint:
         return lp_mint
     raise RaydiumError("Raydium pool is missing lpMint")
+
+
+def _tvl_usd(pool: dict[str, Any]) -> Decimal | None:
+    raw = pool.get("tvl")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        return Decimal(str(raw))
+    except Exception:
+        return None

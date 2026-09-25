@@ -48,6 +48,9 @@ class RiskReport(BaseModel):
     risk_score: int = Field(ge=0, le=100)
     checks: list[CheckResult]
     scanned_at: datetime
+    # Raydium pool TVL in USD from the same lookup as the LP mint. None when
+    # that response has no tvl, including pre-migration Pump.fun mints.
+    liquidity_usd: Decimal | None = None
 
 
 class TokenFacts(Protocol):
@@ -79,8 +82,10 @@ class RiskScanner:
         self._facts = facts
         self._funder_graph = funder_graph
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._liquidity_usd: Decimal | None = None
 
     async def scan_token(self, mint: str) -> RiskReport:
+        self._liquidity_usd = None
         checks = [
             await self._run("check_mint_authority", self._check_mint_authority, mint),
             await self._run("check_freeze_authority", self._check_freeze_authority, mint),
@@ -101,6 +106,7 @@ class RiskScanner:
             risk_score=composite_risk_score(checks),
             checks=checks,
             scanned_at=self._clock(),
+            liquidity_usd=self._liquidity_usd,
         )
         logger.info(
             "risk_scan_finished",
@@ -162,6 +168,7 @@ class RiskScanner:
 
     async def _check_lp_lock(self, mint: str) -> tuple[bool, str]:
         book = await self._facts.lp_book(mint)
+        self._liquidity_usd = book.liquidity_usd
         if book.lp_mint is None or book.supply_raw is None:
             return (
                 False,

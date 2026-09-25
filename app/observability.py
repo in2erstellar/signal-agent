@@ -11,12 +11,20 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import structlog
 from prometheus_client import Counter, Gauge, Histogram
 from redis.asyncio import Redis
 
-from app.config import BAIT_CHECK_QUEUE, RISK_SCAN_QUEUE
+from app.config import (
+    AI_REVIEW_DAILY_BUDGET,
+    AI_REVIEW_HOURLY_BUDGET,
+    AI_REVIEW_QUEUE,
+    BAIT_CHECK_QUEUE,
+    RISK_SCAN_QUEUE,
+)
+from app.services.ai_budget import review_counts
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +45,22 @@ REDIS_QUEUE_SIZE = Gauge(
     "signalforge_redis_queue_size",
     "Current length of a pipeline queue.",
     ["queue"],
+)
+AI_REVIEW_CALLS_LAST_HOUR = Gauge(
+    "signalforge_ai_review_calls_last_hour",
+    "AI review reservations in the current UTC hour.",
+)
+AI_REVIEW_CALLS_LAST_DAY = Gauge(
+    "signalforge_ai_review_calls_last_day",
+    "AI review reservations in the current UTC day.",
+)
+AI_REVIEW_BUDGET_REMAINING_HOUR = Gauge(
+    "signalforge_ai_review_budget_remaining_hour",
+    "AI reviews still allowed in the current UTC hour.",
+)
+AI_REVIEW_BUDGET_REMAINING_DAY = Gauge(
+    "signalforge_ai_review_budget_remaining_day",
+    "AI reviews still allowed in the current UTC day.",
 )
 
 
@@ -72,8 +96,15 @@ async def collect_queue_sizes(redis: Redis) -> None:
     try:
         risk_depth = int(await redis.xlen(RISK_SCAN_QUEUE))
         bait_depth = int(await redis.zcard(BAIT_CHECK_QUEUE))
+        review_depth = int(await redis.xlen(AI_REVIEW_QUEUE))
+        hour, day = await review_counts(redis, datetime.now(timezone.utc))
     except Exception as exc:
         logger.warning("queue_metrics_unavailable", error=type(exc).__name__)
         return
     REDIS_QUEUE_SIZE.labels(queue=RISK_SCAN_QUEUE).set(risk_depth)
     REDIS_QUEUE_SIZE.labels(queue=BAIT_CHECK_QUEUE).set(bait_depth)
+    REDIS_QUEUE_SIZE.labels(queue=AI_REVIEW_QUEUE).set(review_depth)
+    AI_REVIEW_CALLS_LAST_HOUR.set(hour)
+    AI_REVIEW_CALLS_LAST_DAY.set(day)
+    AI_REVIEW_BUDGET_REMAINING_HOUR.set(max(0, AI_REVIEW_HOURLY_BUDGET - hour))
+    AI_REVIEW_BUDGET_REMAINING_DAY.set(max(0, AI_REVIEW_DAILY_BUDGET - day))

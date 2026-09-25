@@ -47,9 +47,14 @@ class Token(Base):
     discovery_status: Mapped[str | None] = mapped_column(String)
     creator_address: Mapped[str | None] = mapped_column(String)
     bonding_curve_key: Mapped[str | None] = mapped_column(String)
-    # skipped_pre_migration: do not build a funder graph yet.
-    # built: a graph walk finished. NULL: not decided (wallet-discovered rows).
+    # skipped_pre_migration: bonding curve, graph not built.
+    # pending_post_migration: migration event seen, graph not built yet.
+    # completed_post_migration: graph built from post-migration holders.
+    # built: wallet-discovered row whose graph finished. NULL: not decided.
     funder_graph_status: Mapped[str | None] = mapped_column(String)
+    ai_review: Mapped[str | None] = mapped_column(String)
+    ai_review_status: Mapped[str | None] = mapped_column(String)
+    ai_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     transactions: Mapped[list[WalletTx]] = relationship(
         back_populates="token",
@@ -80,7 +85,13 @@ class Token(Base):
         ),
         CheckConstraint(
             "funder_graph_status IS NULL OR funder_graph_status IN "
-            "('skipped_pre_migration', 'built')",
+            "('skipped_pre_migration', 'pending_post_migration', "
+            "'completed_post_migration', 'built')",
             name="funder_graph_status_values",
+        ),
+        CheckConstraint(
+            "ai_review_status IS NULL OR ai_review_status IN "
+            "('pending', 'completed', 'failed')",
+            name="ai_review_status_values",
         ),
     )

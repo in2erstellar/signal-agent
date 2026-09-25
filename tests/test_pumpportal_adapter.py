@@ -11,10 +11,13 @@ from structlog.testing import capture_logs
 
 from app.adapters.pumpportal import (
     DISCOVERY_DOWN_MESSAGE,
+    SUBSCRIBE_MIGRATION,
     SUBSCRIBE_NEW_TOKEN,
+    MigrationEvent,
     NewTokenEvent,
     PumpPortalAlreadyConnected,
     PumpPortalClient,
+    parse_migration,
     parse_new_token,
     pumpportal_ws_url,
 )
@@ -39,6 +42,14 @@ LIVE_CREATE = (
     '"pool":"pump"}'
 )
 LIVE_ACK = '{"message":"Successfully subscribed to token creation events."}'
+# Captured by scripts/inspect_migration_schema.py from subscribeMigration.
+LIVE_MIGRATION = (
+    '{"signature":"35fwAoDRzr7BBALA4AXYgEMixHdugY1R82GNvjiXgtpvmgBBQNhgpCdDeigo4NZWMgRgy3VrH87ZFB2kjiYQ3dGq",'
+    '"mint":"HXWP9B1a7xRpCSrdU53GoGgvTftdHFxYtWvpP6gbpump",'
+    '"txType":"migrate",'
+    '"pool":"pump-amm"}'
+)
+LIVE_MIGRATION_ACK = '{"message":"Subscribed to \'migration\' events."}'
 
 
 class ScriptedSocket:
@@ -87,6 +98,20 @@ def test_parse_live_create_and_ignore_ack() -> None:
     assert parse_new_token('{"txType":"buy","mint":"mint"}') is None
     assert parse_new_token("{not-json") is None
     assert parse_new_token('{"txType":"create","mint":"mint","traderPublicKey":"creator"}') is None
+    assert parse_new_token(LIVE_MIGRATION) is None
+
+
+def test_parse_live_migration_and_ignore_its_ack() -> None:
+    event = parse_migration(LIVE_MIGRATION)
+    assert event == MigrationEvent(
+        mint="HXWP9B1a7xRpCSrdU53GoGgvTftdHFxYtWvpP6gbpump",
+        signature="35fwAoDRzr7BBALA4AXYgEMixHdugY1R82GNvjiXgtpvmgBBQNhgpCdDeigo4NZWMgRgy3VrH87ZFB2kjiYQ3dGq",
+        pool="pump-amm",
+        tx_type="migrate",
+    )
+    assert parse_migration(LIVE_MIGRATION_ACK) is None
+    assert parse_migration(LIVE_CREATE) is None
+    assert parse_migration('{"txType":"migrate"}') is None
 
 
 def test_url_appends_a_key_only_when_one_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,9 +145,10 @@ async def test_second_connect_is_refused_while_the_socket_is_open() -> None:
     with pytest.raises(PumpPortalAlreadyConnected):
         await other.connect()
     assert opens == 1
-    sent = json.loads(client._socket.sent[0])  # type: ignore[union-attr]
-    assert sent == SUBSCRIBE_NEW_TOKEN
+    sent = [json.loads(frame) for frame in client._socket.sent]  # type: ignore[union-attr]
+    assert sent == [SUBSCRIBE_NEW_TOKEN, SUBSCRIBE_MIGRATION]
     assert "subscribeTokenTrade" not in json.dumps(sent)
+    assert "subscribeAccountTrade" not in json.dumps(sent)
 
     await client.close()
     await other.connect()
@@ -158,7 +184,7 @@ async def test_reconnect_uses_backoff_then_yields_the_next_create() -> None:
     assert [event.mint for event in found] == ["CMdp4kwo65eeNV9RP4NWGf7ZRXeZnqeszVfJQV2Tpump"]
 
 
-async def test_reconnect_subscribes_only_to_new_tokens() -> None:
+async def test_reconnect_subscribes_to_creates_and_migrations_on_one_socket() -> None:
     first = ScriptedSocket([ConnectionError("drop")])
     second = ScriptedSocket([LIVE_CREATE])
     pending = [first, second]
@@ -179,7 +205,11 @@ async def test_reconnect_subscribes_only_to_new_tokens() -> None:
         stop.set()
 
     for socket in (first, second):
-        assert [json.loads(frame) for frame in socket.sent] == [SUBSCRIBE_NEW_TOKEN]
+        assert [json.loads(frame) for frame in socket.sent] == [
+            SUBSCRIBE_NEW_TOKEN,
+            SUBSCRIBE_MIGRATION,
+        ]
+        assert "subscribeTokenTrade" not in json.dumps(socket.sent)
 
 
 async def test_outage_longer_than_five_minutes_logs_critical_and_alerts_once() -> None:

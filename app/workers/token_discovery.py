@@ -25,7 +25,7 @@ from redis.asyncio import Redis
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.adapters.pumpportal import NewTokenEvent
+from app.adapters.pumpportal import MigrationEvent, NewTokenEvent
 from app.config import (
     DISCOVERY_PENDING_BATCH,
     DISCOVERY_PENDING_MAX_AGE_HOURS,
@@ -37,6 +37,7 @@ from app.services.token_store import (
     DISCOVERY_DEAD,
     DISCOVERY_PENDING,
     DISCOVERY_QUALIFIED,
+    FUNDER_GRAPH_PENDING_POST,
     FUNDER_GRAPH_SKIPPED,
     insert_token,
 )
@@ -98,6 +99,10 @@ class TokenDiscovery:
         self._batch = pending_batch
         self._max_age = pending_max_age or timedelta(hours=DISCOVERY_PENDING_MAX_AGE_HOURS)
         self._after: tuple[datetime, str] | None = None
+        self.creates = 0
+        self.qualified_total = 0
+        self.migrations_queued = 0
+        self.holder_failures = 0
 
     async def ingest_create(self, event: NewTokenEvent) -> bool:
         """Store minimal create metadata. Does not touch the risk queue."""
@@ -116,12 +121,48 @@ class TokenDiscovery:
                     funder_graph_status=FUNDER_GRAPH_SKIPPED,
                 )
         if created:
+            self.creates += 1
             logger.info(
                 "token_discovery_pending",
                 mint=event.mint,
                 symbol=event.symbol,
+                creates=self.creates,
             )
         return created
+
+    async def handle_migration(self, event: MigrationEvent) -> bool:
+        """Re-queue the funder graph after the mint leaves the bonding curve.
+
+        Only ``skipped_pre_migration`` changes. A mint that never migrates
+        stays skipped. The risk worker reads ``getTokenLargestAccounts`` when
+        it builds the graph, so this does not pass any pre-migration holder list.
+        """
+        trace_id = new_trace_id()
+        async with self._sessions() as session:
+            async with session.begin():
+                token = await session.scalar(select(Token).where(Token.mint == event.mint))
+                if token is None or token.funder_graph_status != FUNDER_GRAPH_SKIPPED:
+                    logger.info(
+                        "token_discovery_migration_ignored",
+                        mint=event.mint,
+                        status=None if token is None else token.funder_graph_status,
+                    )
+                    return False
+                token.funder_graph_status = FUNDER_GRAPH_PENDING_POST
+                token.trace_id = trace_id
+                await self._redis.xadd(
+                    RISK_SCAN_QUEUE,
+                    {"mint": event.mint, "trace_id": trace_id, "reason": "post_migration"},
+                )
+        self.migrations_queued += 1
+        logger.info(
+            "token_discovery_migration_queued",
+            mint=event.mint,
+            trace_id=trace_id,
+            pool=event.pool,
+            migrations_queued=self.migrations_queued,
+        )
+        return True
 
     async def review_pending(self) -> ReviewCounts:
         now = self._clock()
@@ -136,6 +177,10 @@ class TokenDiscovery:
             checked=len(batch),
             qualified=qualified,
             dead=dead,
+            creates=self.creates,
+            qualified_total=self.qualified_total,
+            migrations_queued=self.migrations_queued,
+            holder_failures=self.holder_failures,
         )
         return ReviewCounts(qualified=qualified, dead=dead, checked=len(batch))
 
@@ -200,10 +245,12 @@ class TokenDiscovery:
         try:
             owners = await self._holders.get_top_holder_owners(item.mint, _HOLDER_TOP_N)
         except Exception as exc:
+            self.holder_failures += 1
             logger.warning(
                 "token_discovery_holders_failed",
                 mint=item.mint,
                 error_type=type(exc).__name__,
+                holder_failures=self.holder_failures,
             )
             return False
         excluded = {item.creator_address, item.bonding_curve_key}
@@ -222,5 +269,11 @@ class TokenDiscovery:
                     RISK_SCAN_QUEUE,
                     {"mint": item.mint, "trace_id": trace_id},
                 )
-        logger.info("token_discovery_qualified", mint=item.mint, trace_id=trace_id)
+        self.qualified_total += 1
+        logger.info(
+            "token_discovery_qualified",
+            mint=item.mint,
+            trace_id=trace_id,
+            qualified_total=self.qualified_total,
+        )
         return True

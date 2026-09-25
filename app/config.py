@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     api_rate_limit_per_minute: int = 60
     anthropic_api_key: SecretStr = Field(default=SecretStr(""))
     twitter_bearer_token: SecretStr = Field(default=SecretStr(""))
+    # Free-tier review provider. Empty disables live calls; the worker does not invent text.
+    groq_api_key: SecretStr = Field(default=SecretStr(""))
+    xai_api_key: SecretStr = Field(default=SecretStr(""))
     environment: Literal["dev", "prod"] = "dev"
     log_level: LogLevel = "INFO"
     # Optional. subscribeNewToken works without a key. A key is not a license
@@ -238,6 +241,19 @@ if AI_REVIEW_DAILY_BUDGET >= AI_REVIEW_HOURLY_BUDGET * 24:
     raise RuntimeError(
         "AI_REVIEW_DAILY_BUDGET must bind before 24 consecutive hourly budgets"
     )
+
+# groq: Groq's free tier (Llama), enough daily requests for the cap above.
+# grok: xAI. Switching this value changes the provider; call sites stay the same.
+AI_REVIEW_PROVIDER = "groq"
+AI_REVIEW_STALE_HOURS = 24
+AI_REVIEW_ALERT_WAIT_SECONDS = 120
+AI_REVIEW_QUEUE = "ai_review_queue"
+AI_REVIEW_GROUP = "ai_review_workers"
+
+if AI_REVIEW_PROVIDER not in {"groq", "grok"}:
+    raise RuntimeError("AI_REVIEW_PROVIDER must be groq or grok")
+if AI_REVIEW_STALE_HOURS <= 0 or AI_REVIEW_ALERT_WAIT_SECONDS < 0:
+    raise RuntimeError("AI review staleness and alert wait must be non-negative")
 if FUNDER_GRAPH_CONCURRENCY < 1:
     raise RuntimeError("FUNDER_GRAPH_CONCURRENCY must be at least 1")
 if DISCOVERY_PENDING_BATCH < 1 or DISCOVERY_REVIEW_INTERVAL_SECONDS <= 0:
