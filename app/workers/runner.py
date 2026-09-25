@@ -35,6 +35,27 @@ Loop = Callable[[], Awaitable[None]]
 SHUTDOWN_GRACE_SECONDS = 25
 
 
+async def resilient_loop(
+    stop: asyncio.Event,
+    cycle: Callable[[], Awaitable[object]],
+    *,
+    name: str,
+    pause_seconds: float = 1,
+) -> None:
+    """Run ``cycle`` until ``stop``. One failure is logged and the loop continues."""
+    while not stop.is_set():
+        try:
+            await cycle()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("worker_loop_failed", loop=name, error_type=type(exc).__name__)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=pause_seconds)
+            except TimeoutError:
+                continue
+
+
 async def poll_loop(
     stop: asyncio.Event,
     cycle: Callable[[], Awaitable[object]],
@@ -89,10 +110,12 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     settings = get_settings()
     engine = create_engine(settings)
     sessions = create_sessionmaker(engine)
+    # XREADGROUP blocks for 5s. The socket timeout has to be longer than that
+    # block, or the first read raises and the consumer task dies.
     redis = Redis.from_url(
         settings.redis_url,
         socket_connect_timeout=5,
-        socket_timeout=5,
+        socket_timeout=20,
         decode_responses=True,
     )
     helius = HeliusClient.from_settings(settings)
@@ -172,8 +195,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     ai_reviews = AiReviewWorker(sessions, redis, reviews, stop=stop)
 
     async def risk_loop() -> None:
-        while not stop.is_set():
-            await risk.run_once(block_ms=5000)
+        await resilient_loop(stop, lambda: risk.run_once(block_ms=5000), name="risk_scan")
 
     async def discovery_loop() -> None:
         async for event in portal.iter_events(stop):
@@ -189,8 +211,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
                 )
 
     async def ai_review_loop() -> None:
-        while not stop.is_set():
-            await ai_reviews.run_once(block_ms=5000)
+        await resilient_loop(stop, lambda: ai_reviews.run_once(block_ms=5000), name="ai_review")
 
     async def review_once() -> None:
         try:
