@@ -39,12 +39,12 @@ SAMPLE = TokenReviewInput(
 # Shape from Groq's error object (message + type) and from captured TPD text:
 # "on tokens per day (TPD): Limit 100000, Used 99787, Requested 1616".
 TPD_MESSAGE = (
-    "Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_test` "
+    "Rate limit reached for model `openai/gpt-oss-120b` in organization `org_test` "
     "on tokens per day (TPD): Limit 100000, Used 99787, Requested 1616. "
     "Please try again in 20m12s."
 )
 RPM_MESSAGE = (
-    "Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_test` "
+    "Rate limit reached for model `openai/gpt-oss-120b` in organization `org_test` "
     "on requests per minute (RPM): Limit 30, Used 30, Requested 1. "
     "Please try again in 2s."
 )
@@ -56,7 +56,7 @@ def test_daily_remainder_is_taken_from_the_message_not_the_minute_header() -> No
         json={
             "error": {
                 "message": (
-                    "Rate limit reached for model `llama-3.3-70b-versatile` "
+                    "Rate limit reached for model `openai/gpt-oss-120b` "
                     "on tokens per day (TPD): Limit 100,000, Used 99,787, Requested 1,616."
                 ),
                 "type": "tokens",

@@ -28,7 +28,7 @@ def test_chars_over_four_is_the_prompt_estimate() -> None:
     from app.adapters.ai_review import _SYSTEM, _user_prompt
 
     assert estimate_review_tokens(review) == (len(_SYSTEM) + len(_user_prompt(review))) // 4
-    assert AI_REVIEW_DAILY_TOKEN_BUDGET == 95_000
+    assert AI_REVIEW_DAILY_TOKEN_BUDGET == 190_000
 
 
 def test_exhausted_token_budget_blocks_while_call_counters_allow() -> None:
@@ -37,14 +37,14 @@ def test_exhausted_token_budget_blocks_while_call_counters_allow() -> None:
         token,
         reviews_this_hour=0,
         reviews_today=0,
-        tokens_today=94_900,
+        tokens_today=189_900,
         estimated_tokens=101,
     )
     allowed = qualifies_for_ai_review(
         token,
         reviews_this_hour=0,
         reviews_today=0,
-        tokens_today=94_900,
+        tokens_today=189_900,
         estimated_tokens=100,
     )
     calls_still_bind = qualifies_for_ai_review(

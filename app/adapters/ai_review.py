@@ -3,10 +3,11 @@
 ``AI_REVIEW_PROVIDER`` in config selects the host and model. Call sites only
 use ``generate_token_review``.
 
-Groq is the default. Its free tier for ``llama-3.3-70b-versatile`` is both
-about 1_000 requests/day and 100_000 tokens/day. The token cap is enforced
-here with a chars/4 estimate and ``AI_REVIEW_DAILY_TOKEN_BUDGET``. ``grok``
-points at xAI's OpenAI-compatible chat endpoint for a later switch.
+Groq is the default. The model id comes from ``AI_REVIEW_MODEL`` (default
+``openai/gpt-oss-120b``). Its published free-tier row is 30 RPM, 1_000 RPD,
+8_000 TPM and 200_000 TPD. The token cap is enforced here with a chars/4
+estimate and ``AI_REVIEW_DAILY_TOKEN_BUDGET``. ``grok`` points at xAI's
+OpenAI-compatible chat endpoint for a later switch.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import Any
 import httpx
 import structlog
 
-from app.config import AI_REVIEW_PROVIDER, Settings
+from app.config import AI_REVIEW_MODEL, AI_REVIEW_PROVIDER, Settings
 
 logger = structlog.get_logger(__name__)
 
@@ -103,11 +104,14 @@ class _Provider:
     model: str
 
 
-def provider_for(name: str) -> _Provider:
+def provider_for(name: str, *, model: str | None = None) -> _Provider:
     if name == "groq":
+        chosen = AI_REVIEW_MODEL if model is None else model.strip()
+        if not chosen:
+            raise ValueError("AI_REVIEW_MODEL must not be empty")
         return _Provider(
             "https://api.groq.com/openai/v1/chat/completions",
-            "llama-3.3-70b-versatile",
+            chosen,
         )
     if name == "grok":
         return _Provider(
@@ -134,10 +138,11 @@ class AiReviewClient:
         *,
         provider: str,
         api_key: str,
+        model: str | None = None,
         client: httpx.AsyncClient | None = None,
         sleep: Sleep | None = None,
     ) -> None:
-        self._provider = provider_for(provider)
+        self._provider = provider_for(provider, model=model)
         self._provider_name = provider
         self._api_key = api_key
         self._owns_client = client is None
@@ -149,6 +154,7 @@ class AiReviewClient:
         return cls(
             provider=AI_REVIEW_PROVIDER,
             api_key=review_api_key(settings),
+            model=settings.ai_review_model if AI_REVIEW_PROVIDER == "groq" else None,
         )
 
     async def aclose(self) -> None:

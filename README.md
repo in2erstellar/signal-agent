@@ -117,6 +117,8 @@ docker compose -f docker-compose.prod.yml exec api alembic upgrade head
 | `API_RATE_LIMIT_PER_MINUTE` | Лимит на один ключ. По умолчанию 60. |
 | `ANTHROPIC_API_KEY` | Зарезервировано, в MVP не вызывается. |
 | `TWITTER_BEARER_TOKEN` | Зарезервировано, модуля Twitter нет. |
+| `GROQ_API_KEY` | Ключ Groq для AI review. Пусто — живые вызовы выключены. |
+| `AI_REVIEW_MODEL` | Id модели Groq. По умолчанию `openai/gpt-oss-120b`. |
 | `ENVIRONMENT` | `dev` или `prod`. |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
 
@@ -147,6 +149,10 @@ pre-commit run --all-files
 ```
 
 `tests/test_models.py` нужен Postgres с TimescaleDB на `localhost:5432`. Остальные интеграционные тесты поднимают Timescale и Redis через testcontainers.
+
+## Модель Groq
+
+Ревью по умолчанию идёт в `openai/gpt-oss-120b` (`AI_REVIEW_MODEL`). Groq регулярно снимает модели с эксплуатации и предупреждает примерно за 60 дней. Это повторяющийся тип отказа этого провайдера, не разовый случай: перед живым прогоном стоит сверяться с [deprecations](https://console.groq.com/docs/deprecations). Смена id — через `AI_REVIEW_MODEL`, без правки кода. Опубликованный free-tier ряд этой модели (30 RPM, 1 000 RPD, 8 000 TPM, 200 000 TPD) лежит на [rate limits](https://console.groq.com/docs/rate-limits); точные цифры организации — на странице Limits в кабинете.
 
 ## Вне этой версии
 

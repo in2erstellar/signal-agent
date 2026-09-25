@@ -18,6 +18,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
+# Production model on Groq. Override with AI_REVIEW_MODEL when Groq retires it.
+AI_REVIEW_MODEL = "openai/gpt-oss-120b"
+
 
 def configure_logging(log_level: str) -> None:
     """Send application logs to stdout as one JSON object per line."""
@@ -78,6 +81,8 @@ class Settings(BaseSettings):
     # Free-tier review provider. Empty disables live calls; the worker does not invent text.
     groq_api_key: SecretStr = Field(default=SecretStr(""))
     xai_api_key: SecretStr = Field(default=SecretStr(""))
+    # Groq retires model ids on a short notice. Override this without a code change.
+    ai_review_model: str = AI_REVIEW_MODEL
     environment: Literal["dev", "prod"] = "dev"
     log_level: LogLevel = "INFO"
     # Optional. subscribeNewToken works without a key. A key is not a license
@@ -107,6 +112,14 @@ class Settings(BaseSettings):
         if value < 1:
             raise ValueError("API_RATE_LIMIT_PER_MINUTE must be at least 1")
         return value
+
+    @field_validator("ai_review_model")
+    @classmethod
+    def ai_review_model_must_be_set(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("AI_REVIEW_MODEL must not be empty")
+        return stripped
 
     @field_validator("helius_api_base_url", "helius_rpc_url", "raydium_api_base_url")
     @classmethod
@@ -220,14 +233,17 @@ if sum(RISK_CHECK_WEIGHTS.values()) != 100:
 
 # How many AI reviews may start. The daily call cap is independent of the hourly
 # one: 10/hour for 24 hours is 240, and 150 must stop the day before that.
-# The call cap is not the Groq free-tier token cap. llama-3.3-70b-versatile
-# also has 100_000 tokens/day. AI_REVIEW_DAILY_TOKEN_BUDGET is 95% of that so
-# a chars/4 estimate can be low and still stop before the provider does.
-# The call cap stays 150 until the prompt size and the call cap are aligned
-# on purpose. The token counter can stop a day earlier.
+# Published free-tier row for openai/gpt-oss-120b on
+# https://console.groq.com/docs/rate-limits (2026-09-25): 30 RPM, 1_000 RPD,
+# 8_000 TPM, 200_000 TPD. The org Limits page can override that summary.
+# AI_REVIEW_DAILY_TOKEN_BUDGET is 95% of TPD so a chars/4 estimate can be low
+# and still stop before the provider does. 150 calls of this prompt (116
+# estimated input tokens, or 516 with the 400-token completion cap) are 77_400
+# tokens, under both 190_000 and the 1_000 RPD. A burst of the whole hourly
+# cap is 10 * 516 = 5_160, under the 8_000 TPM.
 AI_REVIEW_HOURLY_BUDGET = 10
 AI_REVIEW_DAILY_BUDGET = 150
-AI_REVIEW_DAILY_TOKEN_BUDGET = 95_000
+AI_REVIEW_DAILY_TOKEN_BUDGET = 190_000
 # Starting band for a review candidate. Change these here, not at the call site.
 AI_REVIEW_MIN_LIQUIDITY = Decimal("5000")
 AI_REVIEW_SCORE_MIN = Decimal("25")
@@ -247,10 +263,10 @@ if AI_REVIEW_DAILY_BUDGET >= AI_REVIEW_HOURLY_BUDGET * 24:
     raise RuntimeError(
         "AI_REVIEW_DAILY_BUDGET must bind before 24 consecutive hourly budgets"
     )
-if AI_REVIEW_DAILY_TOKEN_BUDGET <= 0 or AI_REVIEW_DAILY_TOKEN_BUDGET >= 100_000:
-    raise RuntimeError("AI_REVIEW_DAILY_TOKEN_BUDGET must sit strictly under 100000 TPD")
+if AI_REVIEW_DAILY_TOKEN_BUDGET <= 0 or AI_REVIEW_DAILY_TOKEN_BUDGET >= 200_000:
+    raise RuntimeError("AI_REVIEW_DAILY_TOKEN_BUDGET must sit strictly under 200000 TPD")
 
-# groq: Groq's free tier (Llama), enough daily requests for the cap above.
+# groq: Groq free tier, enough daily requests for the cap above.
 # grok: xAI. Switching this value changes the provider; call sites stay the same.
 AI_REVIEW_PROVIDER = "groq"
 AI_REVIEW_STALE_HOURS = 24

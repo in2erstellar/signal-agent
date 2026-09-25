@@ -182,6 +182,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         "ai_review_configured",
         configured=ai_review_configured(settings),
         provider=AI_REVIEW_PROVIDER,
+        model=settings.ai_review_model,
     )
     reviews = AiReviewClient.from_settings(settings)
     risk = RiskScanWorker(sessions, redis, funder_factory, scanner_factory, stop=stop)

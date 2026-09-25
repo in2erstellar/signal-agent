@@ -47,6 +47,7 @@ services:
       TWITTER_BEARER_TOKEN: ${TWITTER_BEARER_TOKEN:-replace-me}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       XAI_API_KEY: ${XAI_API_KEY:-}
+      AI_REVIEW_MODEL: ${AI_REVIEW_MODEL:-openai/gpt-oss-120b}
       ENVIRONMENT: dev
       LOG_LEVEL: INFO
     depends_on:
@@ -86,6 +87,7 @@ services:
       TWITTER_BEARER_TOKEN: ${TWITTER_BEARER_TOKEN:-replace-me}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       XAI_API_KEY: ${XAI_API_KEY:-}
+      AI_REVIEW_MODEL: ${AI_REVIEW_MODEL:-openai/gpt-oss-120b}
       ENVIRONMENT: dev
       LOG_LEVEL: INFO
     depends_on:
