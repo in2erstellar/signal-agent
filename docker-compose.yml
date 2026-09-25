@@ -39,7 +39,7 @@ services:
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
       TELEGRAM_BOT_TOKEN: replace-me
-      TELEGRAM_OWNER_IDS: ${TELEGRAM_OWNER_IDS:-}
+      TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
       PUBLIC_API_KEY: ${PUBLIC_API_KEY:-replace-me}
       API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-60}
       ANTHROPIC_API_KEY: replace-me
@@ -77,7 +77,7 @@ services:
       HELIUS_RPC_URL: https://mainnet.helius-rpc.com
       RAYDIUM_API_BASE_URL: https://api-v3.raydium.io
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-replace-me}
-      TELEGRAM_OWNER_IDS: ${TELEGRAM_OWNER_IDS:-}
+      TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
       ANTHROPIC_API_KEY: replace-me
       TWITTER_BEARER_TOKEN: replace-me
       ENVIRONMENT: dev

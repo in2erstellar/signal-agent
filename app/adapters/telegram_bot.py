@@ -135,8 +135,8 @@ def telegram_configured(token: str) -> bool:
     return bool(cleaned) and cleaned != "replace-me"
 
 
-def owner_ids(raw: str) -> frozenset[int]:
-    """Numeric Telegram ids allowed to use the private bot. Empty means nobody."""
+def admin_ids(raw: str) -> frozenset[int]:
+    """Numeric Telegram ids. Empty means the admin list is empty."""
     text = raw.strip()
     if not text:
         return frozenset()
@@ -145,7 +145,7 @@ def owner_ids(raw: str) -> frozenset[int]:
         piece = part.strip()
         if not piece.isdigit():
             raise ValueError(
-                "TELEGRAM_OWNER_IDS must be a comma-separated list of numeric Telegram ids"
+                "TELEGRAM_ADMIN_IDS must be a comma-separated list of numeric Telegram ids"
             )
         found.append(int(piece))
     return frozenset(found)
@@ -156,12 +156,12 @@ def build_application(
     sessions: async_sessionmaker[AsyncSession],
     *,
     clock: Clock | None = None,
-    owners: frozenset[int] | None = None,
+    admins: frozenset[int] | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
     application = Application.builder().token(token).build()
     application.bot_data["sessions"] = sessions
     application.bot_data["clock"] = clock or (lambda: datetime.now(timezone.utc))
-    application.bot_data["owners"] = owners if owners is not None else frozenset()
+    application.bot_data["admins"] = admins if admins is not None else frozenset()
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("settings", cmd_settings))
     application.add_handler(CommandHandler("status", cmd_status))
@@ -174,8 +174,8 @@ def build_application(
     return application
 
 
-def _owners(context: ContextTypes.DEFAULT_TYPE) -> frozenset[int]:
-    raw = context.bot_data.get("owners")
+def _admins(context: ContextTypes.DEFAULT_TYPE) -> frozenset[int]:
+    raw = context.bot_data.get("admins")
     if isinstance(raw, frozenset):
         return raw
     return frozenset()
@@ -183,7 +183,7 @@ def _owners(context: ContextTypes.DEFAULT_TYPE) -> frozenset[int]:
 
 async def _owner_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.effective_user
-    if user is not None and user.id in _owners(context):
+    if user is not None and user.id in _admins(context):
         return True
     if update.message is not None:
         await update.message.reply_text(private_denied_text())

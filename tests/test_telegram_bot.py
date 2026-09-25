@@ -20,7 +20,7 @@ from app.adapters.telegram_bot import (
     cmd_wallets,
     cmd_watch,
     on_pref,
-    owner_ids,
+    admin_ids,
 )
 from app.db.models import AlertDelivery, Token, TrackedWallet, User
 from app.services.subscriber_settings import parse_settings
@@ -44,13 +44,13 @@ async def sessions(pipeline_infra: object):
     await engine.dispose()
 
 
-def _context(sessions: object, owners: frozenset[int] | None = None) -> MagicMock:
+def _context(sessions: object, admins: frozenset[int] | None = None) -> MagicMock:
     context = MagicMock()
     context.args = []
     context.bot_data = {
         "sessions": sessions,
         "clock": lambda: T0,
-        "owners": frozenset({TELEGRAM_ID}) if owners is None else owners,
+        "admins": frozenset({TELEGRAM_ID}) if admins is None else admins,
     }
     return context
 
@@ -172,11 +172,11 @@ async def test_status_without_start_asks_to_register(sessions: object) -> None:
     assert update.message.reply_text.await_args.args[0].startswith("Сначала отправьте /start")
 
 
-def test_owner_ids_parse_a_list_and_reject_junk() -> None:
-    assert owner_ids("") == frozenset()
-    assert owner_ids(" 424242, 7 ") == frozenset({424242, 7})
+def test_admin_ids_parse_a_list_and_reject_junk() -> None:
+    assert admin_ids("") == frozenset()
+    assert admin_ids(" 424242, 7 ") == frozenset({424242, 7})
     with pytest.raises(ValueError):
-        owner_ids("424242, me")
+        admin_ids("424242, me")
 
 
 async def test_stranger_cannot_register(sessions: object) -> None:

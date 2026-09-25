@@ -113,7 +113,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             PerChatRateLimiter,
             TelegramAlertSender,
             build_application,
-            owner_ids,
+            admin_ids,
             telegram_configured,
         )
 
@@ -122,15 +122,15 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             logger.info("telegram_disabled")
             await stop.wait()
             return
-        owners = owner_ids(settings.telegram_owner_ids)
-        application = build_application(token, sessions, owners=owners)
+        admins = admin_ids(settings.telegram_admin_ids)
+        application = build_application(token, sessions, admins=admins)
         application.bot_data["helius"] = helius
         application.bot_data["webhook_id"] = settings.helius_webhook_id.strip()
         dispatcher = AlertDispatcher(
             sessions,
             TelegramAlertSender(application.bot, PerChatRateLimiter()),
             stop=stop,
-            owners=owners,
+            owners=admins,
         )
         await application.initialize()
         await application.start()

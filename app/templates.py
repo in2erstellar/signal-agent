@@ -31,7 +31,7 @@ def welcome_text() -> str:
 
 
 def private_denied_text() -> str:
-    return "Этот бот закрыт. Ваш Telegram id нет в TELEGRAM_OWNER_IDS."
+    return "Этот бот закрыт. Ваш Telegram id нет в TELEGRAM_ADMIN_IDS."
 
 
 def unregistered_text() -> str:

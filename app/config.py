@@ -69,8 +69,8 @@ class Settings(BaseSettings):
     helius_rpc_url: str = "https://mainnet.helius-rpc.com"
     raydium_api_base_url: str = "https://api-v3.raydium.io"
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
-    # Comma-separated Telegram user ids. Empty keeps the bot closed.
-    telegram_owner_ids: str = ""
+    # Comma-separated Telegram user ids. Empty means there are no admins.
+    telegram_admin_ids: str = ""
     public_api_key: SecretStr = Field(default=SecretStr(""))
     api_rate_limit_per_minute: int = 60
     anthropic_api_key: SecretStr = Field(default=SecretStr(""))
