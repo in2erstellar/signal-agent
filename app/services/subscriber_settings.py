@@ -15,6 +15,13 @@ from typing import Any
 
 from app.config import DEFAULT_MAX_RISK, DEFAULT_MIN_SCORE
 
+# name -> (score floor, risk cap). Buttons on the settings screen.
+ALERT_PRESETS: dict[str, tuple[Decimal, Decimal]] = {
+    "strict": (Decimal("70"), Decimal("25")),
+    "balanced": (Decimal("50"), Decimal("60")),
+    "wide": (Decimal("30"), Decimal("100")),
+}
+
 
 @dataclass(frozen=True)
 class AlertPrefs:

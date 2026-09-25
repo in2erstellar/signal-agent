@@ -111,6 +111,24 @@ async def test_settings_step_does_not_cross_zero_or_one_hundred(sessions: object
     assert prefs.max_risk == Decimal("100")
 
 
+async def test_settings_preset_and_alert_switch(sessions: object) -> None:
+    context = _context(sessions)
+    await grant_admin(sessions)
+    preset = _press("set:go:strict")
+    await on_callback(preset, context)
+    paused = _press("set:live:off")
+    await on_callback(paused, context)
+    async with sessions() as session:  # type: ignore[operator]
+        row = await session.scalar(select(User).where(User.telegram_id == TELEGRAM_ID))
+    assert row is not None
+    prefs = parse_settings(row.settings)
+    assert prefs.min_score == Decimal("70")
+    assert prefs.max_risk == Decimal("25")
+    assert prefs.active is False
+    body = paused.callback_query.edit_message_text.await_args.args[0]
+    assert "paused" in body
+
+
 async def test_wallet_delete_asks_before_it_removes_the_row(sessions: object) -> None:
     await grant_admin(sessions)
     async with sessions() as session:  # type: ignore[operator]

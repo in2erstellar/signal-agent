@@ -48,7 +48,7 @@ from app.config import (
 )
 from app.db.models import AlertDelivery, BaitFlag, Signal, Token, TrackedWallet, User, WalletTx
 from app.services.dialog_state import clear_pending_input, get_pending_input, set_pending_input
-from app.services.subscriber_settings import AlertPrefs, parse_settings, with_updates
+from app.services.subscriber_settings import ALERT_PRESETS, AlertPrefs, parse_settings, with_updates
 from app.services.token_store import AI_REVIEW_COMPLETED
 from app.templates import (
     admin_restricted_text,
@@ -270,19 +270,34 @@ def menu_markup(*, admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def settings_markup(min_score: Decimal, max_risk: Decimal) -> InlineKeyboardMarkup:
+def settings_markup(
+    min_score: Decimal,
+    max_risk: Decimal,
+    *,
+    active: bool,
+) -> InlineKeyboardMarkup:
     step = format_score(SETTINGS_STEP)
+    alerts = "🔔 Alerts: on" if active else "🔕 Alerts: paused"
+    toggle = "off" if active else "on"
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("🎯 Score floor", callback_data="set:hold")],
             [
                 InlineKeyboardButton(f"− {step}", callback_data="set:min:-"),
-                InlineKeyboardButton(f" {format_score(min_score)} ", callback_data="set:hold"),
+                InlineKeyboardButton(format_score(min_score), callback_data="set:hold"),
                 InlineKeyboardButton(f"+ {step}", callback_data="set:min:+"),
             ],
+            [InlineKeyboardButton("🛡 Risk cap", callback_data="set:hold")],
             [
                 InlineKeyboardButton(f"− {step}", callback_data="set:max:-"),
-                InlineKeyboardButton(f" {format_score(max_risk)} ", callback_data="set:hold"),
+                InlineKeyboardButton(format_score(max_risk), callback_data="set:hold"),
                 InlineKeyboardButton(f"+ {step}", callback_data="set:max:+"),
+            ],
+            [InlineKeyboardButton(alerts, callback_data=f"set:live:{toggle}")],
+            [
+                InlineKeyboardButton("🔒 Strict", callback_data="set:go:strict"),
+                InlineKeyboardButton("⚖️ Balanced", callback_data="set:go:balanced"),
+                InlineKeyboardButton("🌊 Wide", callback_data="set:go:wide"),
             ],
             [_menu_button()],
         ]
@@ -484,11 +499,17 @@ async def _route_settings(
 ) -> bool:
     if rest == ("hold",):
         return True
-    if len(rest) != 2 or rest[0] not in {"min", "max"} or rest[1] not in {"+", "-"}:
-        return False
-    delta = SETTINGS_STEP if rest[1] == "+" else -SETTINGS_STEP
-    await _adjust_setting(context, query, telegram_id, rest[0], delta)
-    return True
+    if len(rest) == 2 and rest[0] in {"min", "max"} and rest[1] in {"+", "-"}:
+        delta = SETTINGS_STEP if rest[1] == "+" else -SETTINGS_STEP
+        await _adjust_setting(context, query, telegram_id, rest[0], delta)
+        return True
+    if rest[0] == "live" and len(rest) == 2 and rest[1] in {"on", "off"}:
+        await _set_alerts(context, query, telegram_id, rest[1] == "on")
+        return True
+    if rest[0] == "go" and len(rest) == 2 and rest[1] in ALERT_PRESETS:
+        await _apply_preset(context, query, telegram_id, rest[1])
+        return True
+    return False
 
 
 async def _ask_wallet(
@@ -720,8 +741,8 @@ async def _show_settings(
         return
     await _edit(
         query,
-        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
-        settings_markup(prefs.min_score, prefs.max_risk),
+        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk, active=prefs.active),
+        settings_markup(prefs.min_score, prefs.max_risk, active=prefs.active),
     )
 
 
@@ -749,10 +770,55 @@ async def _adjust_setting(
             prefs = parse_settings(row.settings)
             min_score = prefs.min_score
             max_risk = prefs.max_risk
+            active = prefs.active
     await _edit(
         query,
-        settings_text(min_score=min_score, max_risk=max_risk),
-        settings_markup(min_score, max_risk),
+        settings_text(min_score=min_score, max_risk=max_risk, active=active),
+        settings_markup(min_score, max_risk, active=active),
+    )
+
+
+async def _set_alerts(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+    active: bool,
+) -> None:
+    await _write_prefs(context, query, telegram_id, active=active)
+
+
+async def _apply_preset(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+    name: str,
+) -> None:
+    floor, cap = ALERT_PRESETS[name]
+    await _write_prefs(context, query, telegram_id, min_score=floor, max_risk=cap)
+
+
+async def _write_prefs(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    telegram_id: int,
+    **changes: object,
+) -> None:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        async with session.begin():
+            row = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+            if row is None:
+                await _edit(query, unregistered_text())
+                return
+            row.settings = with_updates(row.settings, **changes)
+            prefs = parse_settings(row.settings)
+            min_score = prefs.min_score
+            max_risk = prefs.max_risk
+            active = prefs.active
+    await _edit(
+        query,
+        settings_text(min_score=min_score, max_risk=max_risk, active=active),
+        settings_markup(min_score, max_risk, active=active),
     )
 
 
@@ -790,8 +856,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     await _send(
         message,
-        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk),
-        settings_markup(prefs.min_score, prefs.max_risk),
+        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk, active=prefs.active),
+        settings_markup(prefs.min_score, prefs.max_risk, active=prefs.active),
     )
 
 

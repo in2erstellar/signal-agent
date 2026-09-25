@@ -11,6 +11,7 @@ from html import escape
 from app.config import FOOTER_DISCLAIMER, RISK_ICON_LOW_MAX, RISK_ICON_MED_MAX
 from app.ui_constants import (
     ICON_BAIT_WARNING,
+    ICON_CANCEL,
     ICON_RISK_HIGH,
     ICON_RISK_LOW,
     ICON_RISK_MED,
@@ -30,36 +31,29 @@ STORED_SCAN_NOTE = (
 
 def welcome_text() -> str:
     return (
-        "SignalForge watches buys from wallets you add and messages this chat "
-        "when the score clears your threshold.\n"
+        f"{ICON_SIGNAL} <b>Parse</b>\n"
         "\n"
-        "/watch address — add a wallet\n"
-        "/wallets — list\n"
-        "/unwatch address — remove a wallet that has no trades\n"
-        "/signals — latest signals\n"
-        "/risk mint — stored scan\n"
-        "/settings — threshold\n"
-        "/status — your settings and alerts in the last 24 hours\n"
-        "/menu — buttons\n"
+        "New token alerts land in this chat when they clear your bar.\n"
         "\n"
-        "This bot does not buy or sell. "
-        "/watch appends the address to the Helius webhook that already exists."
+        f"{ICON_SETTINGS} Score floor, risk cap, presets, and the alert switch are in Settings.\n"
+        f"{ICON_WALLET} Wallet list is on the menu.\n"
+        f"{ICON_CANCEL} This bot does not buy or sell.\n"
+        "\n"
+        "Use the buttons, or /menu."
     )
 
 
 def user_welcome_text() -> str:
     return (
-        "SignalForge sends token signals from wallets that admins watch.\n"
+        f"{ICON_SIGNAL} <b>Parse</b>\n"
         "\n"
-        "You can read signals, open a stored risk report, and set your own "
-        "alert threshold. You cannot add or remove wallets.\n"
+        "Token alerts from watched wallets land in this chat.\n"
         "\n"
-        "/signals — latest signals\n"
-        "/risk mint — stored scan\n"
-        "/settings — your threshold\n"
-        "/status — your settings and alerts in the last 24 hours\n"
+        f"{ICON_SIGNAL} Signals and stored risk cards are on the menu.\n"
+        f"{ICON_SETTINGS} Your score floor, risk cap, and alert switch are in Settings.\n"
+        f"{ICON_CANCEL} This bot does not buy or sell.\n"
         "\n"
-        "This bot does not buy or sell."
+        "Use the buttons, or /menu."
     )
 
 
@@ -69,10 +63,13 @@ def admin_restricted_text() -> str:
 
 def menu_text(*, admin: bool) -> str:
     if admin:
-        return f"{ICON_SIGNAL} <b>SignalForge</b>\nSignals, wallets, settings, and status."
+        return (
+            f"{ICON_SIGNAL} <b>Menu</b>\n"
+            "Signals · wallets · settings · status"
+        )
     return (
-        f"{ICON_SIGNAL} <b>SignalForge</b>\n"
-        "Signals, settings, and status. Wallet changes are admin-only."
+        f"{ICON_SIGNAL} <b>Menu</b>\n"
+        "Signals · settings · status"
     )
 
 
@@ -84,20 +81,22 @@ def unregistered_text() -> str:
     return "Send /start first to subscribe to signals."
 
 
-def settings_text(*, min_score: Decimal, max_risk: Decimal) -> str:
+def settings_text(*, min_score: Decimal, max_risk: Decimal, active: bool) -> str:
+    alerts = "on" if active else "paused"
     return (
         f"{ICON_SETTINGS} <b>Settings</b>\n"
         "\n"
-        "Signal threshold (min_score): an alert is sent when composite_score "
-        "is at least this number.\n"
-        f"Current: {format_score(min_score)}\n"
+        f"🎯 <b>Score floor</b>  {format_score(min_score)}\n"
+        "Alert when the composite score is at least this.\n"
         "\n"
-        "Max risk (max_risk): an alert is sent when 100 − risk_score is at most "
-        "this number. A higher value lets more tokens through. 100 accepts any "
-        "score. 0 accepts only tokens whose known checks all passed.\n"
-        f"Current: {format_score(max_risk)}\n"
+        f"🛡 <b>Risk cap</b>  {format_score(max_risk)}\n"
+        "Highest risk points you still accept (100 − risk score).\n"
+        "100 lets every scanned token through. 0 keeps a clean scan only.\n"
         "\n"
-        "risk_score is a check score, not a claim that the token is safe."
+        f"🔔 <b>Alerts</b>  {alerts}\n"
+        "\n"
+        "Presets set both numbers at once.\n"
+        "🔒 Strict 70 / 25 · ⚖️ Balanced 50 / 60 · 🌊 Wide 30 / 100"
     )
 
 
@@ -108,13 +107,14 @@ def status_text(
     active: bool,
     alerts_24h: int,
 ) -> str:
-    state = "on" if active else "off: you blocked the bot"
+    state = "on" if active else "paused"
     return (
         f"{ICON_STATUS} <b>Status</b>\n"
-        f"Bot: {state}\n"
-        f"min_score: {format_score(min_score)}\n"
-        f"max_risk: {format_score(max_risk)}\n"
-        f"Alerts in the last 24 hours: {alerts_24h}"
+        "\n"
+        f"🔔 Alerts: {state}\n"
+        f"🎯 Score floor: {format_score(min_score)}\n"
+        f"🛡 Risk cap: {format_score(max_risk)}\n"
+        f"📨 Last 24 hours: {alerts_24h}"
     )
 
 

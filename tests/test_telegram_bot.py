@@ -86,7 +86,7 @@ async def test_start_registers_once_and_sends_the_welcome(sessions: object) -> N
     assert prefs.active is True
     texts = [call.args[0] for call in update.message.reply_text.await_args_list]
     assert texts[0] == welcome_text()
-    assert "SignalForge" in texts[0]
+    assert "Parse" in texts[0]
     assert DISCLAIMER not in texts[0]
     assert "m:wallets" in _callback_data(update.message.reply_text.await_args_list[-1])
 
@@ -119,8 +119,9 @@ async def test_settings_buttons_persist_min_score(sessions: object) -> None:
     labels = [button.text for row in markup.inline_keyboard for button in row]
     assert "− 5" in labels
     assert "+ 5" in labels
-    assert " 50 " in labels
-    assert " 100 " in labels
+    assert "50" in labels
+    assert "100" in labels
+    assert "🔒 Strict" in labels
 
     chosen = MagicMock()
     chosen.effective_user.id = TELEGRAM_ID
@@ -134,7 +135,7 @@ async def test_settings_buttons_persist_min_score(sessions: object) -> None:
     assert row is not None
     assert parse_settings(row.settings).min_score == Decimal("55")
     edited = chosen.callback_query.edit_message_text.await_args.args[0]
-    assert "Current: 55" in edited
+    assert "Score floor</b>  55" in edited
 
 
 async def test_status_counts_deliveries_in_the_last_day(sessions: object) -> None:
@@ -171,9 +172,9 @@ async def test_status_counts_deliveries_in_the_last_day(sessions: object) -> Non
     status = _command()
     await cmd_status(status, context)
     text = status.message.reply_text.await_args.args[0]
-    assert "min_score: 50" in text
-    assert "max_risk: 100" in text
-    assert "Alerts in the last 24 hours: 1" in text
+    assert "Score floor: 50" in text
+    assert "Risk cap: 100" in text
+    assert "Last 24 hours: 1" in text
 
 
 async def test_status_without_start_asks_to_register(sessions: object) -> None:
