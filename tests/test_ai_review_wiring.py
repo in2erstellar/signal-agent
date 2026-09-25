@@ -10,7 +10,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.adapters.ai_review import AiReviewError, TokenReviewInput
+from app.adapters.ai_review import AiReviewError, TokenReview, TokenReviewInput
 from app.config import AI_REVIEW_DAILY_BUDGET, AI_REVIEW_QUEUE
 from app.db.models import Signal, Token
 from app.services.ai_budget import day_key, review_counts
@@ -31,14 +31,14 @@ class _Review:
         self.text = text
         self.calls = 0
 
-    async def generate_token_review(self, token: TokenReviewInput) -> str:
+    async def generate_token_review(self, token: TokenReviewInput) -> TokenReview:
         self.calls += 1
         assert token.mint
-        return self.text
+        return TokenReview(text=self.text)
 
 
 class _Permanent:
-    async def generate_token_review(self, token: TokenReviewInput) -> str:
+    async def generate_token_review(self, token: TokenReviewInput) -> TokenReview:
         del token
         raise AiReviewError("rejected", status_code=400, retryable=False)
 

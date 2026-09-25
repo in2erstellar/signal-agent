@@ -3,14 +3,16 @@
 ``AI_REVIEW_PROVIDER`` in config selects the host and model. Call sites only
 use ``generate_token_review``.
 
-Groq is the default because its free tier allows on the order of a thousand
-Llama requests per day, which covers ``AI_REVIEW_DAILY_BUDGET`` (150).
-Gemini's free tier is tens of requests per day and cannot serve that cap.
-``grok`` points at xAI's OpenAI-compatible chat endpoint for a later switch.
+Groq is the default. Its free tier for ``llama-3.3-70b-versatile`` is both
+about 1_000 requests/day and 100_000 tokens/day. The token cap is enforced
+here with a chars/4 estimate and ``AI_REVIEW_DAILY_TOKEN_BUDGET``. ``grok``
+points at xAI's OpenAI-compatible chat endpoint for a later switch.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,7 +26,17 @@ logger = structlog.get_logger(__name__)
 REQUEST_TIMEOUT_SECONDS = 20.0
 MAX_ATTEMPTS = 3
 _MAX_REVIEW_CHARS = 1500
-_RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+_RETRYABLE_STATUS = frozenset({408, 500, 502, 503, 504})
+_MAX_RETRY_AFTER_SECONDS = 60
+Sleep = Callable[[float], Awaitable[None]]
+
+# Official error object is {"error": {"message", "type"}} from
+# https://console.groq.com/docs/errors. Rate-limit headers from
+# https://console.groq.com/docs/rate-limits: retry-after is seconds and is
+# set only on 429; x-ratelimit-remaining-tokens is tokens per minute, not
+# tokens per day. The daily dimension is named in error.message, for example
+# "on tokens per day (TPD): Limit 100000, Used 99787, Requested 1616".
+_QUOTA_FIELD = re.compile(r"\b(Limit|Used|Requested)\s+([\d,]+)", re.IGNORECASE)
 
 _SYSTEM = (
     "You write a short English risk note for a Solana memecoin monitor. "
@@ -35,10 +47,26 @@ _SYSTEM = (
 
 
 class AiReviewError(Exception):
-    def __init__(self, message: str, *, status_code: int, retryable: bool) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        retryable: bool,
+        budget_exceeded: bool = False,
+        limit_kind: str | None = None,
+        quota_limit: int | None = None,
+        quota_used: int | None = None,
+        quota_remaining: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.budget_exceeded = budget_exceeded
+        self.limit_kind = limit_kind
+        self.quota_limit = quota_limit
+        self.quota_used = quota_used
+        self.quota_remaining = quota_remaining
 
 
 @dataclass(frozen=True)
@@ -50,6 +78,23 @@ class TokenReviewInput:
     risk_flags: tuple[str, ...]
     liquidity_usd: str | None
     composite_score: str | None
+
+
+@dataclass(frozen=True)
+class TokenReview:
+    text: str
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class _Quota:
+    kind: str
+    retryable: bool
+    limit: int | None
+    used: int | None
+    requested: int | None
+    remaining: int | None
+    retry_after_seconds: int | None
 
 
 @dataclass(frozen=True)
@@ -90,12 +135,14 @@ class AiReviewClient:
         provider: str,
         api_key: str,
         client: httpx.AsyncClient | None = None,
+        sleep: Sleep | None = None,
     ) -> None:
         self._provider = provider_for(provider)
         self._provider_name = provider
         self._api_key = api_key
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS)
+        self._sleep = sleep or _async_sleep
 
     @classmethod
     def from_settings(cls, settings: Settings) -> AiReviewClient:
@@ -108,7 +155,7 @@ class AiReviewClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def generate_token_review(self, token: TokenReviewInput) -> str:
+    async def generate_token_review(self, token: TokenReviewInput) -> TokenReview:
         if not self._api_key or self._api_key == "replace-me":
             raise AiReviewError(
                 f"{self._provider_name} API key is not configured",
@@ -125,7 +172,8 @@ class AiReviewClient:
             ],
         }
         response = await self._post(body)
-        return _review_text(response.json())
+        payload = response.json()
+        return TokenReview(text=_review_text(payload), total_tokens=_total_tokens(payload))
 
     async def _post(self, body: dict[str, Any]) -> httpx.Response:
         last_status = 0
@@ -154,6 +202,39 @@ class AiReviewClient:
             if response.status_code == 200:
                 return response
             last_status = response.status_code
+            if response.status_code == 429:
+                quota = classify_rate_limit(response)
+                if not quota.retryable:
+                    logger.warning(
+                        "ai_review_budget_exceeded",
+                        provider=self._provider_name,
+                        limit_kind=quota.kind,
+                        quota_limit=quota.limit,
+                        quota_used=quota.used,
+                        quota_requested=quota.requested,
+                        quota_remaining=quota.remaining,
+                    )
+                    raise AiReviewError(
+                        f"{self._provider_name} daily quota is exhausted",
+                        status_code=429,
+                        retryable=False,
+                        budget_exceeded=True,
+                        limit_kind=quota.kind,
+                        quota_limit=quota.limit,
+                        quota_used=quota.used,
+                        quota_remaining=quota.remaining,
+                    )
+                if attempt + 1 < MAX_ATTEMPTS:
+                    delay = _backoff_seconds(quota.retry_after_seconds, attempt)
+                    logger.warning(
+                        "ai_review_rate_limited",
+                        provider=self._provider_name,
+                        limit_kind=quota.kind,
+                        retry_after_seconds=delay,
+                        attempt=attempt + 1,
+                    )
+                    await self._sleep(delay)
+                continue
             logger.warning(
                 "ai_review_http_error",
                 provider=self._provider_name,
@@ -173,6 +254,11 @@ class AiReviewClient:
         )
 
 
+def estimate_review_tokens(token: TokenReviewInput) -> int:
+    """chars/4 of the system prompt plus the user prompt. Not a tokenizer."""
+    return (len(_SYSTEM) + len(_user_prompt(token))) // 4
+
+
 def _user_prompt(token: TokenReviewInput) -> str:
     flags = ", ".join(token.risk_flags) if token.risk_flags else "none"
     return "\n".join(
@@ -187,6 +273,102 @@ def _user_prompt(token: TokenReviewInput) -> str:
             "risk_score is a known-check score, not a claim the token is safe.",
         ]
     )
+
+
+def classify_rate_limit(response: httpx.Response) -> _Quota:
+    """Split a Groq 429 into a short-window retry or a daily quota stop.
+
+    ``x-ratelimit-remaining-tokens`` is tokens per minute, so it is not the
+    daily remainder. Daily remainder is ``Limit - Used`` from ``error.message``
+    when that message names tokens per day or requests per day.
+    """
+    message = _error_message(response)
+    kind = _limit_kind(message)
+    counts = _quota_counts(message)
+    limit = counts.get("limit")
+    used = counts.get("used")
+    requested = counts.get("requested")
+    remaining = None
+    if limit is not None and used is not None:
+        remaining = max(0, limit - used)
+    daily = kind in {"tpd", "rpd"}
+    return _Quota(
+        kind=kind,
+        retryable=not daily,
+        limit=limit,
+        used=used,
+        requested=requested,
+        remaining=remaining,
+        retry_after_seconds=_retry_after_seconds(response),
+    )
+
+
+def _error_message(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return ""
+    message = error.get("message")
+    return message if isinstance(message, str) else ""
+
+
+def _limit_kind(message: str) -> str:
+    text = message.lower()
+    if "tokens per day" in text or "(tpd)" in text:
+        return "tpd"
+    if "requests per day" in text or "(rpd)" in text:
+        return "rpd"
+    if "requests per minute" in text or "(rpm)" in text:
+        return "rpm"
+    if "tokens per minute" in text or "(tpm)" in text:
+        return "tpm"
+    return "unknown"
+
+
+def _quota_counts(message: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for match in _QUOTA_FIELD.finditer(message):
+        counts[match.group(1).lower()] = int(match.group(2).replace(",", ""))
+    return counts
+
+
+def _retry_after_seconds(response: httpx.Response) -> int | None:
+    raw = response.headers.get("retry-after")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return None
+
+
+def _backoff_seconds(retry_after: int | None, attempt: int) -> float:
+    if retry_after is None:
+        return float(min(2**attempt, _MAX_RETRY_AFTER_SECONDS))
+    return float(min(retry_after, _MAX_RETRY_AFTER_SECONDS))
+
+
+def _total_tokens(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    total = usage.get("total_tokens")
+    if isinstance(total, bool) or not isinstance(total, int):
+        return None
+    return total if total >= 0 else None
+
+
+async def _async_sleep(delay: float) -> None:
+    import asyncio
+
+    await asyncio.sleep(delay)
 
 
 def _review_text(payload: Any) -> str:

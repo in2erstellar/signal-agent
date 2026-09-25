@@ -27,6 +27,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import config
+from app.adapters.ai_review import TokenReviewInput, estimate_review_tokens
 from app.config import (
     AI_REVIEW_QUEUE,
     SIGNAL_BAIT_WEIGHT,
@@ -37,7 +38,7 @@ from app.config import (
 )
 from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace
-from app.services.ai_budget import release_review, reserve_review, review_counts
+from app.services.ai_budget import release_review, reserve_review, review_counts, tokens_used
 from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING
 
 logger = structlog.get_logger(__name__)
@@ -88,11 +89,14 @@ def qualifies_for_ai_review(
     *,
     reviews_this_hour: int,
     reviews_today: int,
+    tokens_today: int = 0,
+    estimated_tokens: int = 0,
 ) -> bool:
-    """True only inside the score band, with enough liquidity, and under both caps.
+    """True only inside the score band, with enough liquidity, and under every cap.
 
-    The daily cap is checked on its own. A quiet hour does not bypass it, and
-    a day that still has room does not bypass the hourly cap.
+    The daily call cap is checked on its own. A quiet hour does not bypass it,
+    and a day that still has call room does not bypass the hourly cap or the
+    token cap. ``estimated_tokens`` is chars/4 of this review's prompt.
     """
     liquidity = token.liquidity_usd
     if liquidity is None or liquidity < config.AI_REVIEW_MIN_LIQUIDITY:
@@ -103,6 +107,8 @@ def qualifies_for_ai_review(
     if reviews_this_hour >= config.AI_REVIEW_HOURLY_BUDGET:
         return False
     if reviews_today >= config.AI_REVIEW_DAILY_BUDGET:
+        return False
+    if tokens_today + max(0, estimated_tokens) > config.AI_REVIEW_DAILY_TOKEN_BUDGET:
         return False
     return True
 
@@ -232,10 +238,10 @@ class SignalFusion:
                     wallet_score=str(wallet_score) if wallet_score is not None else None,
                     bait_flag_penalty=str(penalty or 0),
                 )
-            await self._enqueue_review(token, now)
+            await self._enqueue_review(token, now, score)
         return inserted
 
-    async def _enqueue_review(self, token: Token, now: datetime) -> None:
+    async def _enqueue_review(self, token: Token, now: datetime, score: Decimal) -> None:
         redis = self._redis
         if not self._reviews_enabled or redis is None:
             return
@@ -244,15 +250,25 @@ class SignalFusion:
         if _review_is_fresh(token, now):
             return
         hour, day = await review_counts(redis, now)
-        if not qualifies_for_ai_review(token, reviews_this_hour=hour, reviews_today=day):
+        spent_tokens = await tokens_used(redis, now)
+        estimate = estimate_review_tokens(_review_input(token, score))
+        if not qualifies_for_ai_review(
+            token,
+            reviews_this_hour=hour,
+            reviews_today=day,
+            tokens_today=spent_tokens,
+            estimated_tokens=estimate,
+        ):
             logger.info(
                 "ai_review_skipped",
                 mint=token.mint,
                 reviews_this_hour=hour,
                 reviews_today=day,
+                tokens_today=spent_tokens,
+                estimated_tokens=estimate,
             )
             return
-        if not await reserve_review(redis, now):
+        if not await reserve_review(redis, now, tokens=estimate):
             logger.info("ai_review_budget_exhausted", mint=token.mint)
             return
         token.ai_review_status = AI_REVIEW_PENDING
@@ -263,13 +279,27 @@ class SignalFusion:
                     "mint": token.mint,
                     "trace_id": token.trace_id or "",
                     "reserved_at": now.isoformat(),
+                    "reserved_tokens": str(estimate),
                 },
             )
         except Exception:
-            await release_review(redis, now)
+            await release_review(redis, now, tokens=estimate)
             token.ai_review_status = None
             raise
         logger.info("ai_review_enqueued", mint=token.mint, trace_id=token.trace_id)
+
+
+def _review_input(token: Token, score: Decimal) -> TokenReviewInput:
+    flags = token.risk_flags if isinstance(token.risk_flags, list) else []
+    return TokenReviewInput(
+        mint=token.mint,
+        symbol=token.symbol,
+        name=token.name,
+        risk_score=None if token.risk_score is None else str(token.risk_score),
+        risk_flags=tuple(str(flag) for flag in flags),
+        liquidity_usd=None if token.liquidity_usd is None else str(token.liquidity_usd),
+        composite_score=str(score),
+    )
 
 
 def _review_is_fresh(token: Token, now: datetime) -> bool:

@@ -17,12 +17,26 @@ from redis.exceptions import ResponseError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.adapters.ai_review import AiReviewError, TokenReviewInput
-from app.config import AI_REVIEW_GROUP, AI_REVIEW_QUEUE
+from app.adapters.ai_review import AiReviewError, TokenReview, TokenReviewInput
+from app.config import (
+    AI_REVIEW_DAILY_BUDGET,
+    AI_REVIEW_DAILY_TOKEN_BUDGET,
+    AI_REVIEW_GROUP,
+    AI_REVIEW_QUEUE,
+)
 from app.db.models import Signal, Token
 from app.observability import bind_trace, new_trace_id
-from app.services.ai_budget import release_review
-from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_FAILED
+from app.services.ai_budget import (
+    raise_call_floor,
+    raise_token_floor,
+    reconcile_tokens,
+    release_review,
+)
+from app.services.token_store import (
+    AI_REVIEW_COMPLETED,
+    AI_REVIEW_FAILED,
+    AI_REVIEW_SKIPPED_BUDGET,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -30,7 +44,7 @@ Clock = Callable[[], datetime]
 
 
 class ReviewClient(Protocol):
-    async def generate_token_review(self, token: TokenReviewInput) -> str: ...
+    async def generate_token_review(self, token: TokenReviewInput) -> TokenReview: ...
 
 
 class AiReviewWorker:
@@ -98,6 +112,9 @@ class AiReviewWorker:
             if token.ai_review_status == AI_REVIEW_COMPLETED and token.ai_review:
                 logger.info("ai_review_already_stored", mint=mint)
                 return True
+            if token.ai_review_status == AI_REVIEW_SKIPPED_BUDGET:
+                logger.info("ai_review_already_skipped_budget", mint=mint)
+                return True
             signal = await session.scalar(select(Signal).where(Signal.token_id == token.id))
             flags = token.risk_flags if isinstance(token.risk_flags, list) else []
             review_input = TokenReviewInput(
@@ -110,8 +127,11 @@ class AiReviewWorker:
                 composite_score=None if signal is None else str(signal.composite_score),
             )
         try:
-            text = await self._client.generate_token_review(review_input)
+            review = await self._client.generate_token_review(review_input)
         except AiReviewError as exc:
+            if exc.budget_exceeded:
+                await self._mark_budget_exceeded(mint, fields, exc)
+                return True
             if exc.retryable:
                 logger.warning(
                     "ai_review_retry",
@@ -121,7 +141,8 @@ class AiReviewWorker:
                 return False
             await self._mark_failed(mint, fields)
             return True
-        await self._store(mint, text)
+        await self._store(mint, review.text)
+        await self._reconcile(fields, review.total_tokens)
         return True
 
     async def _store(self, mint: str, text: str) -> None:
@@ -136,6 +157,39 @@ class AiReviewWorker:
                 token.ai_review_at = now
         logger.info("ai_review_completed", mint=mint)
 
+    async def _reconcile(self, fields: dict[str, str], actual: int | None) -> None:
+        if actual is None:
+            return
+        moment = _reserved_at(fields)
+        if moment is None:
+            return
+        reserved = _reserved_tokens(fields)
+        await reconcile_tokens(self._redis, moment, reserved, actual)
+
+    async def _mark_budget_exceeded(self, mint: str, fields: dict[str, str], exc: AiReviewError) -> None:
+        async with self._sessions() as session:
+            async with session.begin():
+                token = await session.scalar(select(Token).where(Token.mint == mint))
+                if token is not None:
+                    token.ai_review_status = AI_REVIEW_SKIPPED_BUDGET
+                    token.ai_review_at = self._clock()
+        await self._refund(fields)
+        moment = _reserved_at(fields) or self._clock()
+        if exc.limit_kind == "tpd":
+            floor = exc.quota_used if exc.quota_used is not None else AI_REVIEW_DAILY_TOKEN_BUDGET
+            await raise_token_floor(self._redis, moment, floor)
+        elif exc.limit_kind == "rpd":
+            floor = exc.quota_used if exc.quota_used is not None else AI_REVIEW_DAILY_BUDGET
+            await raise_call_floor(self._redis, moment, floor)
+        logger.warning(
+            "ai_review_skipped_budget",
+            mint=mint,
+            limit_kind=exc.limit_kind,
+            quota_limit=exc.quota_limit,
+            quota_used=exc.quota_used,
+            quota_remaining=exc.quota_remaining,
+        )
+
     async def _mark_failed(self, mint: str, fields: dict[str, str]) -> None:
         async with self._sessions() as session:
             async with session.begin():
@@ -146,16 +200,10 @@ class AiReviewWorker:
         logger.info("ai_review_permanent_failure", mint=mint)
 
     async def _refund(self, fields: dict[str, str]) -> None:
-        raw = fields.get("reserved_at")
-        if not raw:
+        moment = _reserved_at(fields)
+        if moment is None:
             return
-        try:
-            moment = datetime.fromisoformat(raw)
-        except ValueError:
-            return
-        if moment.tzinfo is None:
-            moment = moment.replace(tzinfo=timezone.utc)
-        await release_review(self._redis, moment)
+        await release_review(self._redis, moment, tokens=_reserved_tokens(fields))
 
     async def _ack(self, message_id: str) -> None:
         await self._redis.xack(AI_REVIEW_QUEUE, AI_REVIEW_GROUP, message_id)
@@ -195,3 +243,24 @@ class AiReviewWorker:
 
     def _stopping(self) -> bool:
         return self._stop is not None and self._stop.is_set()
+
+
+def _reserved_at(fields: dict[str, str]) -> datetime | None:
+    raw = fields.get("reserved_at")
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def _reserved_tokens(fields: dict[str, str]) -> int:
+    raw = fields.get("reserved_tokens") or "0"
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0

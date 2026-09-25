@@ -19,12 +19,13 @@ from redis.asyncio import Redis
 
 from app.config import (
     AI_REVIEW_DAILY_BUDGET,
+    AI_REVIEW_DAILY_TOKEN_BUDGET,
     AI_REVIEW_HOURLY_BUDGET,
     AI_REVIEW_QUEUE,
     BAIT_CHECK_QUEUE,
     RISK_SCAN_QUEUE,
 )
-from app.services.ai_budget import review_counts
+from app.services.ai_budget import review_counts, tokens_used
 
 logger = structlog.get_logger(__name__)
 
@@ -60,7 +61,15 @@ AI_REVIEW_BUDGET_REMAINING_HOUR = Gauge(
 )
 AI_REVIEW_BUDGET_REMAINING_DAY = Gauge(
     "signalforge_ai_review_budget_remaining_day",
-    "AI reviews still allowed in the current UTC day.",
+    "AI reviews still allowed in the current UTC day by the call counter.",
+)
+AI_REVIEW_TOKENS_LAST_DAY = Gauge(
+    "signalforge_ai_review_tokens_last_day",
+    "Estimated AI review tokens reserved in the current UTC day.",
+)
+AI_REVIEW_TOKEN_BUDGET_REMAINING_DAY = Gauge(
+    "signalforge_ai_review_token_budget_remaining_day",
+    "Estimated AI review tokens still allowed in the current UTC day.",
 )
 
 
@@ -97,7 +106,9 @@ async def collect_queue_sizes(redis: Redis) -> None:
         risk_depth = int(await redis.xlen(RISK_SCAN_QUEUE))
         bait_depth = int(await redis.zcard(BAIT_CHECK_QUEUE))
         review_depth = int(await redis.xlen(AI_REVIEW_QUEUE))
-        hour, day = await review_counts(redis, datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        hour, day = await review_counts(redis, now)
+        spent_tokens = await tokens_used(redis, now)
     except Exception as exc:
         logger.warning("queue_metrics_unavailable", error=type(exc).__name__)
         return
@@ -108,3 +119,5 @@ async def collect_queue_sizes(redis: Redis) -> None:
     AI_REVIEW_CALLS_LAST_DAY.set(day)
     AI_REVIEW_BUDGET_REMAINING_HOUR.set(max(0, AI_REVIEW_HOURLY_BUDGET - hour))
     AI_REVIEW_BUDGET_REMAINING_DAY.set(max(0, AI_REVIEW_DAILY_BUDGET - day))
+    AI_REVIEW_TOKENS_LAST_DAY.set(spent_tokens)
+    AI_REVIEW_TOKEN_BUDGET_REMAINING_DAY.set(max(0, AI_REVIEW_DAILY_TOKEN_BUDGET - spent_tokens))

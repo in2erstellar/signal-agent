@@ -25,6 +25,7 @@ FUNDER_GRAPH_BUILT = "built"
 AI_REVIEW_PENDING = "pending"
 AI_REVIEW_COMPLETED = "completed"
 AI_REVIEW_FAILED = "failed"
+AI_REVIEW_SKIPPED_BUDGET = "skipped_budget_exceeded"
 
 
 async def insert_token(

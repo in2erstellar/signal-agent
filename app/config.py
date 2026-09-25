@@ -218,10 +218,16 @@ MAX_RISK_CHOICES = (
 if sum(RISK_CHECK_WEIGHTS.values()) != 100:
     raise RuntimeError("RISK_CHECK_WEIGHTS must sum to 100")
 
-# How many AI reviews may start. The daily cap is independent of the hourly
+# How many AI reviews may start. The daily call cap is independent of the hourly
 # one: 10/hour for 24 hours is 240, and 150 must stop the day before that.
+# The call cap is not the Groq free-tier token cap. llama-3.3-70b-versatile
+# also has 100_000 tokens/day. AI_REVIEW_DAILY_TOKEN_BUDGET is 95% of that so
+# a chars/4 estimate can be low and still stop before the provider does.
+# The call cap stays 150 until the prompt size and the call cap are aligned
+# on purpose. The token counter can stop a day earlier.
 AI_REVIEW_HOURLY_BUDGET = 10
 AI_REVIEW_DAILY_BUDGET = 150
+AI_REVIEW_DAILY_TOKEN_BUDGET = 95_000
 # Starting band for a review candidate. Change these here, not at the call site.
 AI_REVIEW_MIN_LIQUIDITY = Decimal("5000")
 AI_REVIEW_SCORE_MIN = Decimal("25")
@@ -241,6 +247,8 @@ if AI_REVIEW_DAILY_BUDGET >= AI_REVIEW_HOURLY_BUDGET * 24:
     raise RuntimeError(
         "AI_REVIEW_DAILY_BUDGET must bind before 24 consecutive hourly budgets"
     )
+if AI_REVIEW_DAILY_TOKEN_BUDGET <= 0 or AI_REVIEW_DAILY_TOKEN_BUDGET >= 100_000:
+    raise RuntimeError("AI_REVIEW_DAILY_TOKEN_BUDGET must sit strictly under 100000 TPD")
 
 # groq: Groq's free tier (Llama), enough daily requests for the cap above.
 # grok: xAI. Switching this value changes the provider; call sites stay the same.

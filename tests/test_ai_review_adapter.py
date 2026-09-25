@@ -65,7 +65,8 @@ async def test_generate_token_review_posts_to_the_selected_host() -> None:
         text = await groq.generate_token_review(SAMPLE)
         grok = AiReviewClient(provider="grok", api_key="xai-test", client=http)
         await grok.generate_token_review(SAMPLE)
-    assert text == "Four facts."
+    assert text.text == "Four facts."
+    assert text.total_tokens is None
     assert [str(request.url) for request in seen] == [
         "https://api.groq.com/openai/v1/chat/completions",
         "https://api.x.ai/v1/chat/completions",

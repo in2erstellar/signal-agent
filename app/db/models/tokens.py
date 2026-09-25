@@ -91,7 +91,7 @@ class Token(Base):
         ),
         CheckConstraint(
             "ai_review_status IS NULL OR ai_review_status IN "
-            "('pending', 'completed', 'failed')",
+            "('pending', 'completed', 'failed', 'skipped_budget_exceeded')",
             name="ai_review_status_values",
         ),
     )

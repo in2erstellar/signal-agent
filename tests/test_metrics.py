@@ -44,6 +44,8 @@ async def test_metrics_lists_webhook_alert_scan_and_queues() -> None:
     assert "signalforge_ai_review_calls_last_day" in body
     assert "signalforge_ai_review_budget_remaining_hour" in body
     assert "signalforge_ai_review_budget_remaining_day" in body
+    assert "signalforge_ai_review_tokens_last_day" in body
+    assert "signalforge_ai_review_token_budget_remaining_day" in body
 
 
 def test_bind_trace_merges_into_the_log_event() -> None:
