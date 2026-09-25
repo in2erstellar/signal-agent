@@ -4,6 +4,7 @@ embed user-facing sentences. Messages use HTML, not Markdown.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from html import escape
@@ -180,10 +181,20 @@ def risk_card_text(
     return "\n".join(lines)
 
 
+_MARKDOWN_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+
+
 def _review_lines(ai_review: str | None) -> list[str]:
     if not ai_review or not ai_review.strip():
         return []
-    return ["", "<b>AI review</b>", escape(ai_review.strip())]
+    return ["", "<b>AI review</b>", review_html(ai_review)]
+
+
+def review_html(raw: str) -> str:
+    """Escape model text, then turn Markdown bold into Telegram HTML."""
+    escaped = escape(raw.strip())
+    rendered = _MARKDOWN_BOLD.sub(r"<b>\1</b>", escaped)
+    return "\n".join(line.rstrip() for line in rendered.splitlines())
 
 
 def signal_row(symbol: str | None, composite: Decimal, when: datetime) -> str:

@@ -56,6 +56,17 @@ def test_alert_text_puts_an_escaped_ai_block_before_the_disclaimer() -> None:
     )
     assert "<b>AI review</b>" in text
     assert escape(review) in text
+    bold = alert_text(
+        symbol="ASI",
+        mint="AJzWtzVh77uQxK1aLPt4STMtFnHVQKNkNPRA4ebfpump",
+        composite_score=Decimal("53.57"),
+        risk_score=Decimal("75"),
+        risk_flags=["check_lp_lock"],
+        bait_warning=False,
+        ai_review="**Token:** ASI <test>\n**Mint:** AJzW  ",
+    )
+    assert "<b>Token:</b> ASI &lt;test&gt;" in bold
+    assert "**" not in bold
     assert text.endswith(DISCLAIMER)
     assert text.index("<b>AI review</b>") < text.index(DISCLAIMER)
     quiet = alert_text(

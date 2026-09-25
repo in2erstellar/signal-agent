@@ -46,7 +46,7 @@ _SYSTEM = (
     "You write a short English risk note for a Solana memecoin monitor. "
     "Use only the fields in the user message. Do not tell the reader to buy "
     "or sell. Do not invent liquidity, holders, or social proof. "
-    "Four sentences at most."
+    "Four sentences at most. Plain text only: no Markdown, no asterisks."
 )
 
 
