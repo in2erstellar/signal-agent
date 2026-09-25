@@ -12,6 +12,7 @@ import pytest
 from app.adapters.helius import (
     FundingDepthExceeded,
     FundingInfo,
+    FundingSourceUnresolved,
     HeliusClient,
     funding_from_transaction,
 )
@@ -50,9 +51,38 @@ def _transfer(signature: str, *, block_time: int = 1_700_000_000) -> dict[str, o
     }
 
 
+def _flat(signature: str) -> dict[str, object]:
+    """Wallet is listed, but its SOL balance does not increase."""
+    return {
+        "slot": 41,
+        "blockTime": 1_600_000_000,
+        "transaction": {
+            "signatures": [signature],
+            "message": {
+                "accountKeys": [
+                    {"pubkey": SENDER, "signer": True, "writable": True},
+                    {"pubkey": WALLET, "signer": False, "writable": True},
+                ]
+            },
+        },
+        "meta": {
+            "err": None,
+            "fee": 5000,
+            "preBalances": [1_000_000_000, 0],
+            "postBalances": [999_995_000, 0],
+        },
+    }
+
+
 class _Rpc:
-    def __init__(self, pages: list[list[dict[str, object]]]) -> None:
+    def __init__(
+        self,
+        pages: list[list[dict[str, object]]],
+        *,
+        flat: set[str] | None = None,
+    ) -> None:
         self.pages = list(pages)
+        self.flat = flat or set()
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -66,9 +96,10 @@ class _Rpc:
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": page})
         if method == "getTransaction":
             signature = str(params[0])
+            payload = _flat(signature) if signature in self.flat else _transfer(signature)
             return httpx.Response(
                 200,
-                json={"jsonrpc": "2.0", "id": 1, "result": _transfer(signature)},
+                json={"jsonrpc": "2.0", "id": 1, "result": payload},
             )
         raise AssertionError(method)
 
@@ -147,6 +178,39 @@ async def test_signature_cap_is_not_an_empty_history() -> None:
         "getSignaturesForAddress",
     ]
     assert rpc.pages
+
+
+async def test_skips_an_oldest_signature_with_no_sol_inflow() -> None:
+    rpc = _Rpc(
+        [[_sig("sig-new", block_time=1_700_000_100), _sig("sig-old")]],
+        flat={"sig-old"},
+    )
+    info = await _lookup(rpc)
+    assert info is not None
+    assert info.signature == "sig-new"
+    assert info.funder == SENDER
+    assert [method for method, _config in rpc.calls] == [
+        "getSignaturesForAddress",
+        "getTransaction",
+        "getTransaction",
+    ]
+
+
+async def test_full_history_without_an_inflow_is_no_funder() -> None:
+    rpc = _Rpc([[_sig("sig-only")]], flat={"sig-only"})
+    assert await _lookup(rpc) is None
+    assert [method for method, _config in rpc.calls].count("getTransaction") == 1
+
+
+async def test_inspect_cap_is_not_an_empty_history() -> None:
+    rpc = _Rpc(
+        [[_sig("sig-new"), _sig("sig-mid"), _sig("sig-old")]],
+        flat={"sig-old"},
+    )
+    with pytest.raises(FundingSourceUnresolved) as caught:
+        await _lookup(rpc, max_funding_transactions=1)
+    assert caught.value.wallet_address == WALLET
+    assert [method for method, _config in rpc.calls].count("getTransaction") == 1
 
 
 async def test_no_signatures_means_there_is_no_funder() -> None:

@@ -27,6 +27,7 @@ import structlog
 from app.config import (
     FUNDER_LOOKUP_METHOD,
     MAX_FUNDING_LOOKUP_SIGNATURES,
+    MAX_FUNDING_TRANSACTION_INSPECT,
     Settings,
 )
 
@@ -133,6 +134,7 @@ class HeliusClient:
         funder_lookup_method: str = FUNDER_LOOKUP_METHOD,
         signature_page_size: int = _SIGNATURE_PAGE_LIMIT,
         max_funding_signatures: int = MAX_FUNDING_LOOKUP_SIGNATURES,
+        max_funding_transactions: int = MAX_FUNDING_TRANSACTION_INSPECT,
     ) -> None:
         if not api_key:
             raise ValueError("HELIUS_API_KEY is empty")
@@ -142,6 +144,8 @@ class HeliusClient:
             raise ValueError(f"signature_page_size must be 1..{_SIGNATURE_PAGE_LIMIT}")
         if max_funding_signatures < 1:
             raise ValueError("max_funding_signatures must be at least 1")
+        if max_funding_transactions < 1:
+            raise ValueError("max_funding_transactions must be at least 1")
         self._api_key = api_key
         self._api_base_url = api_base_url.rstrip("/")
         self._rpc_url = rpc_url.rstrip("/")
@@ -151,6 +155,7 @@ class HeliusClient:
         self._funder_lookup_method = funder_lookup_method
         self._signature_page_size = signature_page_size
         self._max_funding_signatures = max_funding_signatures
+        self._max_funding_transactions = max_funding_transactions
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=self._timeout)
 
@@ -285,53 +290,77 @@ class HeliusClient:
         """
         if self._funder_lookup_method == "helius_funded_by":
             return await self.get_first_funding_tx(wallet_address)
-        oldest, scanned = await self._oldest_signature(wallet_address)
-        if oldest is None:
+        oldest_first, scanned = await self._signatures_oldest_first(wallet_address)
+        if not oldest_first:
             logger.info(
                 "funding_lookup_no_history",
                 wallet=wallet_address,
                 signatures_scanned=scanned,
             )
             return None
-        signature = str(oldest["signature"])
-        transaction = await self._call_rpc(
-            "getTransaction",
-            [
-                signature,
-                {
-                    "encoding": "jsonParsed",
-                    "commitment": "confirmed",
-                    "maxSupportedTransactionVersion": 0,
-                },
-            ],
-        )
-        if not isinstance(transaction, dict):
-            raise FundingSourceUnresolved(wallet_address, signature, "transaction was not found")
-        info = funding_from_transaction(
-            wallet_address,
-            signature,
-            transaction,
-            fallback_block_time=oldest.get("blockTime"),
-        )
-        if info is None:
-            raise FundingSourceUnresolved(
+        successful = [row for row in oldest_first if row.get("err") is None]
+        if not successful:
+            logger.info(
+                "funding_lookup_no_history",
+                wallet=wallet_address,
+                signatures_scanned=scanned,
+            )
+            return None
+        inspected = 0
+        last_signature = str(successful[0]["signature"])
+        for row in successful[: self._max_funding_transactions]:
+            signature = str(row["signature"])
+            last_signature = signature
+            inspected += 1
+            transaction = await self._call_rpc(
+                "getTransaction",
+                [
+                    signature,
+                    {
+                        "encoding": "jsonParsed",
+                        "commitment": "confirmed",
+                        "maxSupportedTransactionVersion": 0,
+                    },
+                ],
+            )
+            if not isinstance(transaction, dict):
+                continue
+            info = funding_from_transaction(
                 wallet_address,
                 signature,
-                "oldest transaction has no positive SOL inflow to this address",
+                transaction,
+                fallback_block_time=row.get("blockTime"),
             )
-        logger.info(
-            "funding_lookup_rpc",
-            wallet=wallet_address,
-            funder=info.funder,
-            signatures_scanned=scanned,
-            signature=signature,
+            if info is None:
+                continue
+            logger.info(
+                "funding_lookup_rpc",
+                wallet=wallet_address,
+                funder=info.funder,
+                signatures_scanned=scanned,
+                transactions_inspected=inspected,
+                signature=signature,
+            )
+            return info
+        if inspected >= len(successful):
+            # Every successful signature was read. None brought SOL in.
+            logger.info(
+                "funding_lookup_no_sol_inflow",
+                wallet=wallet_address,
+                signatures_scanned=scanned,
+                transactions_inspected=inspected,
+            )
+            return None
+        raise FundingSourceUnresolved(
+            wallet_address,
+            last_signature,
+            "no positive SOL inflow in the oldest inspected transactions",
         )
-        return info
 
-    async def _oldest_signature(
+    async def _signatures_oldest_first(
         self,
         wallet_address: str,
-    ) -> tuple[Mapping[str, Any] | None, int]:
+    ) -> tuple[list[Mapping[str, Any]], int]:
         """Last signature after walking newest-first pages, and how many were read.
 
         Solana returns each page from newest to oldest. ``before`` excludes
@@ -366,8 +395,8 @@ class HeliusClient:
                 raise FundingDepthExceeded(wallet_address, len(collected))
             before = str(page[-1]["signature"])
         if not collected:
-            return None, 0
-        return collected[-1], len(collected)
+            return [], 0
+        return list(reversed(collected)), len(collected)
 
     async def get_top_holder_owners(self, mint: str, top_n: int) -> list[str]:
         """Owner wallets of the largest token accounts, largest balance first.

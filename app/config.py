@@ -278,6 +278,9 @@ FUNDER_LOOKUP_METHOD = "rpc"
 # 1000 signatures is 2 credits. Paging to this cap is 40 signature calls
 # + 1 getTransaction = 41 credits. funded-by on that page is 100 credits.
 MAX_FUNDING_LOOKUP_SIGNATURES = 40000
+# The oldest signature sometimes lists the wallet with no SOL change.
+# Walk this many oldest transactions, oldest first, until the balance rises.
+MAX_FUNDING_TRANSACTION_INSPECT = 25
 
 # PumpPortal discovery. Holder polls stay bounded; a full pending set is
 # revisited over several cycles instead of one RPC burst per minute.
@@ -316,6 +319,8 @@ if FUNDER_LOOKUP_METHOD not in {"rpc", "helius_funded_by"}:
     raise RuntimeError("FUNDER_LOOKUP_METHOD must be rpc or helius_funded_by")
 if MAX_FUNDING_LOOKUP_SIGNATURES < 1:
     raise RuntimeError("MAX_FUNDING_LOOKUP_SIGNATURES must be at least 1")
+if MAX_FUNDING_TRANSACTION_INSPECT < 1:
+    raise RuntimeError("MAX_FUNDING_TRANSACTION_INSPECT must be at least 1")
 if DISCOVERY_PENDING_BATCH < 1 or DISCOVERY_REVIEW_INTERVAL_SECONDS <= 0:
     raise RuntimeError("discovery review batch and interval must be positive")
 if DISCOVERY_FRESH_WINDOW_HOURS <= 0:
