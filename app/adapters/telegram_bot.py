@@ -48,10 +48,12 @@ from app.config import (
 )
 from app.db.models import AlertDelivery, BaitFlag, Signal, Token, TrackedWallet, User, WalletTx
 from app.services.dialog_state import clear_pending_input, get_pending_input, set_pending_input
+from app.services.risk_scanner import unavailable_fields
 from app.services.subscriber_settings import ALERT_PRESETS, AlertPrefs, parse_settings, with_updates
 from app.services.token_store import AI_REVIEW_COMPLETED
 from app.templates import (
     admin_restricted_text,
+    data_incomplete_text,
     format_score,
     menu_text,
     risk_card_text,
@@ -1028,14 +1030,18 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             or 0
         )
-        text = risk_card_text(
-            symbol=token.symbol,
-            mint=token.mint,
-            risk_score=token.risk_score,
-            flags=_failed_flags(token),
-            bait_warning=bait_count > 0,
-            ai_review=_stored_review(token),
-        )
+        missing = unavailable_fields(token.risk_flags)
+        if missing:
+            text = data_incomplete_text(mint=token.mint, missing=missing)
+        else:
+            text = risk_card_text(
+                symbol=token.symbol,
+                mint=token.mint,
+                risk_score=token.risk_score,
+                flags=_failed_flags(token),
+                bait_warning=bait_count > 0,
+                ai_review=_stored_review(token),
+            )
     await _send(message, text)
 
 

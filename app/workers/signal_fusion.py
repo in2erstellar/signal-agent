@@ -39,6 +39,7 @@ from app.config import (
 from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace
 from app.services.ai_budget import release_review, reserve_review, review_counts, tokens_used
+from app.services.risk_scanner import unavailable_fields
 from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING, AI_REVIEW_TRUNCATED
 
 logger = structlog.get_logger(__name__)
@@ -211,10 +212,21 @@ class SignalFusion:
                 BaitFlag.token_id == token.id
             )
         )
+        missing = unavailable_fields(token.risk_flags)
+        if missing:
+            with bind_trace(token.trace_id):
+                logger.warning(
+                    "signal_data_incomplete",
+                    mint=token.mint,
+                    missing=missing,
+                    reason="scan_fields_unavailable",
+                )
+            return False
         risk = token.risk_score if token.risk_score is not None else Decimal(0)
         bait_penalty = Decimal(penalty or 0)
+        wallet_score: Decimal | None
         if wallet_history_known(win_rates):
-            wallet_score: Decimal | None = wallet_score_from_win_rates(win_rates)
+            wallet_score = wallet_score_from_win_rates(win_rates)
             score = composite_score(risk, wallet_score, bait_penalty)
         else:
             wallet_score = None

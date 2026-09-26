@@ -305,6 +305,24 @@ async def test_signals_and_stored_risk_are_readable(sessions: object) -> None:
         stored = await session.scalar(select(Token).where(Token.mint == mint))
     assert stored is not None
 
+    incomplete_mint = "So11111111111111111111111111111111111111112"
+    async with sessions() as session:  # type: ignore[operator]
+        async with session.begin():
+            session.add(
+                make_token(
+                    mint=incomplete_mint,
+                    symbol="GAP",
+                    risk_score=Decimal("75"),
+                    risk_flags=["check_lp_lock:unavailable"],
+                )
+            )
+    incomplete = _command()
+    context.args = [incomplete_mint]
+    await cmd_risk(incomplete, context)
+    notice = incomplete.message.reply_text.await_args.args[0]
+    assert "data incomplete: check_lp_lock" in notice
+    assert "risk_score" not in notice
+
 
 async def test_alert_text_shows_the_score_the_mint_link_and_the_bait_warning() -> None:
     mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"

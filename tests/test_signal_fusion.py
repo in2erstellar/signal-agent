@@ -127,11 +127,42 @@ async def test_fusion_skips_the_exact_threshold_and_writes_just_above(pipeline_i
             assert created_row.wallet_score is None
             assert created_row.composite_score == Decimal("71.43")
 
+        incomplete = make_token(
+            mint="mint-incomplete",
+            risk_score=Decimal("75"),
+            risk_flags=["check_lp_lock:unavailable"],
+            updated_at=NOW,
+        )
+        buyer = make_tracked_wallet(address="wallet-incomplete", win_rate=Decimal("1"))
+        async with sessions() as session:
+            async with session.begin():
+                session.add_all([incomplete, buyer])
+                await session.flush()
+                session.add(
+                    make_wallet_tx(
+                        wallet_id=buyer.id,
+                        token_id=incomplete.id,
+                        action="buy",
+                        amount_sol=Decimal("1"),
+                        block_time=NOW,
+                        tx_signature="buy-incomplete",
+                    )
+                )
+        held, failed_held, created_held = await fusion.run_once()
+        assert created_held == 0
+        assert failed_held == 0
+        assert held >= 1
+        async with sessions() as session:
+            blocked = await session.scalar(select(Token).where(Token.mint == "mint-incomplete"))
+            assert blocked is not None
+            assert (
+                await session.scalar(select(Signal).where(Signal.token_id == blocked.id))
+            ) is None
+
         again, failed_again, created_again = await fusion.run_once()
-        # The below-threshold mint is still inside the scan window and has no
-        # signal, so it is considered again. The mint that already has a
-        # signal is not.
-        assert (again, failed_again, created_again) == (1, 0, 0)
+        # The below-threshold mint and the incomplete scan stay inside the
+        # window with no signal, so both are considered again.
+        assert (again, failed_again, created_again) == (2, 0, 0)
         async with sessions() as session:
             assert await session.scalar(select(func.count()).select_from(Signal)) == 2
     finally:

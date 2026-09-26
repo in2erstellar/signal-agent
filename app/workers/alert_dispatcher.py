@@ -25,9 +25,10 @@ from telegram.error import Forbidden, TelegramError
 from app.config import AI_REVIEW_ALERT_WAIT_SECONDS
 from app.db.models import AlertDelivery, BaitFlag, Signal, Token, User
 from app.observability import bind_trace, record_alert_sent
+from app.services.risk_scanner import unavailable_fields
 from app.services.subscriber_settings import accepts_alert, parse_settings, with_updates
 from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING
-from app.templates import alert_text
+from app.templates import alert_text, data_incomplete_text
 
 logger = structlog.get_logger(__name__)
 
@@ -123,15 +124,25 @@ class AlertDispatcher:
         failed = 0
         delivered: list[UUID] = []
         deactivated: list[UUID] = []
-        text = alert_text(
-            symbol=snapshot.symbol,
-            mint=snapshot.mint,
-            composite_score=snapshot.composite_score,
-            risk_score=snapshot.risk_score,
-            risk_flags=snapshot.risk_flags,
-            bait_warning=snapshot.bait_warning,
-            ai_review=snapshot.ai_review,
-        )
+        missing = unavailable_fields(snapshot.risk_flags)
+        if missing:
+            text = data_incomplete_text(mint=snapshot.mint, missing=missing)
+            logger.warning(
+                "alert_data_incomplete",
+                mint=snapshot.mint,
+                missing=missing,
+                reason="scan_fields_unavailable",
+            )
+        else:
+            text = alert_text(
+                symbol=snapshot.symbol,
+                mint=snapshot.mint,
+                composite_score=snapshot.composite_score,
+                risk_score=snapshot.risk_score,
+                risk_flags=snapshot.risk_flags,
+                bait_warning=snapshot.bait_warning,
+                ai_review=snapshot.ai_review,
+            )
         with bind_trace(snapshot.trace_id):
             for recipient in snapshot.recipients:
                 try:

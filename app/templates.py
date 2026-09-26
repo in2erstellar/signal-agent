@@ -119,6 +119,17 @@ def status_text(
     )
 
 
+def data_incomplete_text(*, mint: str, missing: list[str]) -> str:
+    fields = ", ".join(escape(field) for field in missing) if missing else "unknown"
+    return (
+        f"⚠️ <b>data incomplete: {fields}</b>\n"
+        f"{solscan_token(mint)}\n"
+        "\n"
+        "The source for these fields did not return them, so this is not a score. "
+        "A later scan can still change the picture."
+    )
+
+
 def alert_text(
     *,
     symbol: str | None,

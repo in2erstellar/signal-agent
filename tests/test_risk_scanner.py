@@ -186,11 +186,11 @@ async def test_lp_lock_below_threshold_is_high_risk() -> None:
     _assert_risk_language(detail)
 
 
-async def test_lp_lock_missing_pool_fails_without_raising() -> None:
+async def test_lp_lock_missing_pool_is_incomplete_not_a_score() -> None:
     scanner, _, _ = _scanner(FakeFacts(lp_book=LpBook(None, None, [])))
     passed, detail = await scanner._check_lp_lock(MINT)
-    assert passed is False
-    assert "No Raydium LP mint" in detail
+    assert passed is None
+    assert detail == "data incomplete: lp_mint, liquidity_usd"
     _assert_risk_language(detail)
 
 

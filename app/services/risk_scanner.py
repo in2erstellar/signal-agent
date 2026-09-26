@@ -119,7 +119,7 @@ class RiskScanner:
     async def _run(
         self,
         name: str,
-        check: Callable[[str], Awaitable[tuple[bool, str]]],
+        check: Callable[[str], Awaitable[tuple[bool | None, str]]],
         mint: str,
     ) -> CheckResult:
         try:
@@ -129,6 +129,7 @@ class RiskScanner:
                 "risk_check_unavailable",
                 check=name,
                 mint=mint,
+                reason=type(exc).__name__,
                 error_type=type(exc).__name__,
             )
             return CheckResult(
@@ -138,7 +139,7 @@ class RiskScanner:
             )
         return CheckResult(name=name, passed=passed, detail=detail)
 
-    async def _check_mint_authority(self, mint: str) -> tuple[bool, str]:
+    async def _check_mint_authority(self, mint: str) -> tuple[bool | None, str]:
         view = await self._facts.mint_view(mint)
         if view.mint_authority is None:
             return (
@@ -152,7 +153,7 @@ class RiskScanner:
             "That authority can increase supply. High-risk pattern.",
         )
 
-    async def _check_freeze_authority(self, mint: str) -> tuple[bool, str]:
+    async def _check_freeze_authority(self, mint: str) -> tuple[bool | None, str]:
         view = await self._facts.mint_view(mint)
         if view.freeze_authority is None:
             return (
@@ -166,16 +167,22 @@ class RiskScanner:
             "That authority can freeze holder wallets. Critical-risk pattern.",
         )
 
-    async def _check_lp_lock(self, mint: str) -> tuple[bool, str]:
+    async def _check_lp_lock(self, mint: str) -> tuple[bool | None, str]:
         book = await self._facts.lp_book(mint)
         self._liquidity_usd = book.liquidity_usd
         if book.lp_mint is None or book.supply_raw is None:
+            missing = ["lp_mint"]
+            if book.liquidity_usd is None:
+                missing.append("liquidity_usd")
+            logger.warning(
+                "liquidity_lookup_incomplete",
+                mint=mint,
+                reason="raydium_returned_no_pool",
+                missing=missing,
+            )
             return (
-                False,
-                "No Raydium LP mint was found. Locked or burned LP was not observed "
-                "at the incinerator address or the Raydium LP lock program. "
-                "High-risk rug-pull pattern. SPL burn that only reduces supply "
-                "is not visible to this check.",
+                None,
+                "data incomplete: " + ", ".join(missing),
             )
         if book.supply_raw <= 0:
             return (
@@ -202,7 +209,7 @@ class RiskScanner:
             "High-risk rug-pull pattern.",
         )
 
-    async def _check_holder_concentration(self, mint: str) -> tuple[bool, str]:
+    async def _check_holder_concentration(self, mint: str) -> tuple[bool | None, str]:
         book = await self._facts.holder_book(mint)
         if book.supply_raw <= 0:
             raise ValueError("mint supply is zero")
@@ -224,7 +231,7 @@ class RiskScanner:
             "This is not evidence the remaining supply is widely held.",
         )
 
-    async def _check_funder_cluster_exposure(self, mint: str) -> tuple[bool, str]:
+    async def _check_funder_cluster_exposure(self, mint: str) -> tuple[bool | None, str]:
         clusters = await self._funder_graph.build_graph_for_token(mint)
         flagged = [
             cluster
@@ -246,6 +253,18 @@ class RiskScanner:
             f"(root {worst.root_funder}, size {worst.cluster_size}, "
             f"confidence {worst.confidence}). Sybil-style funding pattern.",
         )
+
+
+def unavailable_fields(flags: object) -> list[str]:
+    """Check names whose source did not return data. A failed check is not in this list."""
+    if not isinstance(flags, list):
+        return []
+    missing: list[str] = []
+    for flag in flags:
+        text = str(flag)
+        if text.endswith(":unavailable"):
+            missing.append(text.split(":", 1)[0])
+    return missing
 
 
 def composite_risk_score(checks: list[CheckResult]) -> int:
