@@ -118,15 +118,25 @@ class HeliusTokenSecurity:
 
     async def lp_book(self, mint: str) -> LpBook:
         quote = await self._raydium.pool_quote(mint)
-        lp_mint, liquidity_usd, price_usd = quote.lp_mint, quote.tvl_usd, quote.price_usd
-        if lp_mint is None:
+        if quote.lp_mint is None:
             return LpBook(
                 lp_mint=None,
                 supply_raw=None,
                 rows=[],
-                liquidity_usd=liquidity_usd,
-                price_usd=price_usd,
+                liquidity_usd=quote.tvl_usd,
+                price_usd=quote.price_usd,
             )
+        custody = await self.lp_custody(quote.lp_mint)
+        return LpBook(
+            lp_mint=custody.lp_mint,
+            supply_raw=custody.supply_raw,
+            rows=custody.rows,
+            liquidity_usd=quote.tvl_usd,
+            price_usd=quote.price_usd,
+        )
+
+    async def lp_custody(self, lp_mint: str) -> LpBook:
+        """LP holder rows for a mint already known. Does not call Raydium."""
         lp_account = _mint_view(await self._parsed_account(lp_mint))
         largest = await self._helius.rpc("getTokenLargestAccounts", [lp_mint])
         accounts = [
@@ -139,8 +149,6 @@ class HeliusTokenSecurity:
                 lp_mint=lp_mint,
                 supply_raw=lp_account.supply_raw,
                 rows=[],
-                liquidity_usd=liquidity_usd,
-                price_usd=price_usd,
             )
         addresses = [str(item["address"]) for item in accounts]
         parsed = await self._helius.rpc(
@@ -166,8 +174,6 @@ class HeliusTokenSecurity:
             lp_mint=lp_mint,
             supply_raw=lp_account.supply_raw,
             rows=rows,
-            liquidity_usd=liquidity_usd,
-            price_usd=price_usd,
         )
 
     async def _parsed_account(self, address: str) -> dict[str, Any]:

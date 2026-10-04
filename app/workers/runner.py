@@ -189,7 +189,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     reviews = AiReviewClient.from_settings(settings)
     risk = RiskScanWorker(sessions, redis, funder_factory, scanner_factory, stop=stop)
     bait = BaitCheckWorker(sessions, redis, detector_factory, stop=stop)
-    outcomes = OutcomeWorker(sessions, redis, raydium, lp_books=facts, stop=stop)
+    outcomes = OutcomeWorker(sessions, redis, raydium, lp_custody=facts, stop=stop)
     fusion = SignalFusion(
         sessions,
         redis,

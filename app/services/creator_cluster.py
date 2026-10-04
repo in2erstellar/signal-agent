@@ -26,6 +26,13 @@ logger = structlog.get_logger(__name__)
 
 DROP_LIMIT = Decimal("0.1")
 
+# Finished limit of the median-sell line. Not a TODO and not a chain walk.
+# A sell would have to already sit in wallet_txs for a wallet this process
+# tracks. Discovery tokens do not put the creator's sells there, and this
+# field does not read the ledger or the wider network to invent one.
+MEDIAN_SELL_REASON = "not_in_tracked_ledger"
+MEDIAN_SELL_SHOWN = "unavailable (not in the tracked-wallet ledger)"
+
 
 @dataclass(frozen=True)
 class HolderStake:
@@ -146,8 +153,8 @@ def creator_context_dict(
         "lp_stayed_shown": lp_stayed.shown,
         "lp_stayed_reason": lp_stayed.reason,
         "median_sell_status": "unavailable",
-        "median_sell_shown": "unavailable (not in the tracked-wallet ledger)",
-        "median_sell_reason": "not_in_tracked_ledger",
+        "median_sell_shown": MEDIAN_SELL_SHOWN,
+        "median_sell_reason": MEDIAN_SELL_REASON,
     }
     return payload
 

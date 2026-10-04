@@ -37,8 +37,8 @@ class PoolSource(Protocol):
     async def pool_quote(self, mint: str) -> PoolQuote: ...
 
 
-class LpBookSource(Protocol):
-    async def lp_book(self, mint: str) -> Any: ...
+class LpCustodySource(Protocol):
+    async def lp_custody(self, lp_mint: str) -> Any: ...
 
 
 def outcome_member(token_id: UUID, horizon: str) -> str:
@@ -160,14 +160,14 @@ class OutcomeWorker:
         redis: Redis,
         pools: PoolSource,
         *,
-        lp_books: LpBookSource | None = None,
+        lp_custody: LpCustodySource | None = None,
         clock: Clock | None = None,
         stop: Any | None = None,
     ) -> None:
         self._sessions = sessions
         self._redis = redis
         self._pools = pools
-        self._lp_books = lp_books
+        self._lp_custody = lp_custody
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._stop = stop
 
@@ -230,7 +230,13 @@ class OutcomeWorker:
                         error_type=type(exc).__name__,
                     )
                     if horizon == "1h":
-                        row.lp_locked = await self._lp_locked(token.mint)
+                        # The quote failed, so there is no LP mint to re-read.
+                        # A second pools/info/mint call would only repeat the error.
+                        logger.info(
+                            "lp_followup_skipped",
+                            mint=token.mint,
+                            reason="price_lookup_failed",
+                        )
                     return True
                 status, price, reason = quote_observation(quote)
                 row.status = status
@@ -247,14 +253,15 @@ class OutcomeWorker:
                         reason=reason,
                     )
                 if horizon == "1h":
-                    row.lp_locked = await self._lp_locked(token.mint)
+                    # Reuse this quote's LP mint. Custody is Helius-only.
+                    row.lp_locked = await self._lp_locked(token.mint, quote.lp_mint)
         return True
 
-    async def _lp_locked(self, mint: str) -> bool | None:
-        if self._lp_books is None:
+    async def _lp_locked(self, mint: str, lp_mint: str | None) -> bool | None:
+        if lp_mint is None or self._lp_custody is None:
             return None
         try:
-            book = await self._lp_books.lp_book(mint)
+            book = await self._lp_custody.lp_custody(lp_mint)
         except Exception as exc:
             logger.warning("lp_followup_unavailable", mint=mint, error_type=type(exc).__name__)
             return None

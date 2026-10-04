@@ -1,5 +1,11 @@
 """Creator-cluster fields, price snapshots, and LP unlock readings.
 
+Postgres only. This revision does not write Redis. The sorted set
+``signalforge:outcome:pending`` is filled later, one member per horizon,
+when a scan records a pool. ``+24h`` and ``+7d`` wait there until due.
+Downgrade drops the new tables and columns and leaves that set alone.
+On rollback, stop the outcome worker and delete the key, or it sits unread.
+
 Revision ID: 0015_dev_cluster_outcomes
 Revises: 0014_funder_cache_signature
 Create Date: 2026-10-04

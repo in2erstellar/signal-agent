@@ -200,6 +200,7 @@ OUTCOME_HORIZONS = (
 # Starting limit for the creator-funder supply flag. It does not change composite_score.
 DEFAULT_MAX_DEV_CLUSTER_SHARE = Decimal("0.25")
 DEV_CLUSTER_SHARE_STEP = Decimal("0.05")
+# Hours before a recorded LP unlock. The signal card does not print this number.
 UNLOCK_ALERT_LEAD_HOURS = 6
 SIGNAL_RISK_SCAN_MAX_AGE_MINUTES = 5
 

@@ -8,7 +8,8 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.adapters.raydium import PoolQuote, RaydiumError
-from app.config import OUTCOME_HORIZONS, OUTCOME_QUEUE
+from app.adapters.token_security import LpBook, LpHolderRow
+from app.config import OUTCOME_HORIZONS, OUTCOME_QUEUE, UNLOCK_ALERT_LEAD_HOURS
 from app.db.models import OutcomeCheck, Token
 from app.services.creator_cluster import (
     HolderStake,
@@ -87,6 +88,9 @@ def test_card_counts_launches_since_tracking_and_keeps_the_long_note_in_help() -
     assert "scanned holders: 0%" not in text
     assert "Most pump.fun tokens never open a Raydium pool" in help_text()
     assert "unavailable (price lookup failed)" in help_text()
+    assert "those rows are not turned into a median" in help_text()
+    assert "those rows are not turned into a median" not in text
+    assert "TODO" not in help_text()
 
 
 def test_price_drop_uses_only_pairs_that_both_exist() -> None:
@@ -123,28 +127,41 @@ def test_burn_has_no_schedule_and_lock_program_is_unreadable() -> None:
 
 
 def test_unlock_alert_is_due_only_inside_the_lead_window() -> None:
-    unlock_at = NOW + timedelta(hours=2)
+    lead = timedelta(hours=UNLOCK_ALERT_LEAD_HOURS)
+    unlock_at = NOW + lead - timedelta(minutes=1)
     assert unlock_alert_due(
         status="scheduled",
         unlock_at=unlock_at,
         alerted_at=None,
         now=NOW,
-        lead=timedelta(hours=6),
+        lead=lead,
     )
     assert not unlock_alert_due(
         status="unavailable",
         unlock_at=unlock_at,
         alerted_at=None,
         now=NOW,
-        lead=timedelta(hours=6),
+        lead=lead,
     )
     assert not unlock_alert_due(
         status="scheduled",
-        unlock_at=unlock_at,
-        alerted_at=NOW,
+        unlock_at=NOW + lead + timedelta(minutes=1),
+        alerted_at=None,
         now=NOW,
-        lead=timedelta(hours=6),
+        lead=lead,
     )
+    card = creator_block_text(
+        {
+            "creator": "CreatorWallet",
+            "launches_since_tracking": 0,
+            "lp_stayed_shown": "unavailable (no earlier launches)",
+            "price_drop_shown": "unavailable (no earlier launches)",
+            "median_sell_shown": "unavailable (not in the tracked-wallet ledger)",
+            "distribution_status": "unavailable",
+            "distribution_reason": "creator_missing",
+        }
+    )
+    assert f"{UNLOCK_ALERT_LEAD_HOURS} hour" not in card
 
 
 def test_quote_does_not_turn_a_missing_price_into_zero() -> None:
@@ -169,13 +186,28 @@ class _Redis:
         self.scores.get(key, {}).pop(member, None)
 
 
+class _Custody:
+    def __init__(self) -> None:
+        self.mints: list[str] = []
+
+    async def lp_custody(self, lp_mint: str) -> LpBook:
+        self.mints.append(lp_mint)
+        return LpBook(
+            lp_mint,
+            100,
+            [LpHolderRow("burn", 100, is_burn_address=True, is_lock_program=False)],
+        )
+
+
 class _Pools:
     def __init__(self, quote: PoolQuote | None = None, error: Exception | None = None) -> None:
         self.quote = quote or PoolQuote("lp", Decimal("10"), Decimal("0.5"))
         self.error = error
+        self.calls = 0
 
     async def pool_quote(self, mint: str) -> PoolQuote:
         del mint
+        self.calls += 1
         if self.error is not None:
             raise self.error
         return self.quote
@@ -247,13 +279,18 @@ async def test_followups_share_one_queue_and_a_failed_lookup_is_not_a_zero(
                 token_id = token.id
         members = set(redis.scores[OUTCOME_QUEUE])
         assert members == {outcome_member(token_id, name) for name, _seconds in OUTCOME_HORIZONS}
+        pools = _Pools(error=RaydiumError("down"))
+        custody = _Custody()
         worker = OutcomeWorker(
             sessions,
             redis,  # type: ignore[arg-type]
-            _Pools(error=RaydiumError("down")),
+            pools,
+            lp_custody=custody,
             clock=lambda: NOW + timedelta(hours=2),
         )
         processed, failed = await worker.run_once()
+        assert pools.calls == 1
+        assert custody.mints == []
         assert failed == 0
         assert processed == 1
         async with sessions() as session:
@@ -267,6 +304,61 @@ async def test_followups_share_one_queue_and_a_failed_lookup_is_not_a_zero(
         assert row.status == "unavailable"
         assert row.price_reason == "price_lookup_failed"
         assert row.price_usd is None
+    finally:
+        await truncate_pipeline(engine)
+        await engine.dispose()
+
+
+async def test_one_hour_lock_reread_uses_the_quote_it_already_paid_for(
+    pipeline_infra: object,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from tests.pipeline_containers import truncate_pipeline
+
+    infra = pipeline_infra
+    engine = create_async_engine(infra.database_url)  # type: ignore[attr-defined]
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    await truncate_pipeline(engine)
+    redis = _Redis()
+    pools = _Pools(quote=PoolQuote("lp-mint", Decimal("10"), Decimal("1.5")))
+    custody = _Custody()
+    try:
+        async with sessions() as session:
+            async with session.begin():
+                token = Token(mint="mint-reread", first_seen_at=NOW)
+                session.add(token)
+                await session.flush()
+                await record_listing(
+                    session,
+                    redis,  # type: ignore[arg-type]
+                    token,
+                    pool_status="observed",
+                    price_usd=Decimal("2"),
+                    seen_at=NOW,
+                )
+                token_id = token.id
+        worker = OutcomeWorker(
+            sessions,
+            redis,  # type: ignore[arg-type]
+            pools,
+            lp_custody=custody,
+            clock=lambda: NOW + timedelta(hours=2),
+        )
+        processed, failed = await worker.run_once()
+        assert (processed, failed) == (1, 0)
+        assert pools.calls == 1
+        assert custody.mints == ["lp-mint"]
+        async with sessions() as session:
+            row = await session.scalar(
+                select(OutcomeCheck).where(
+                    OutcomeCheck.token_id == token_id,
+                    OutcomeCheck.horizon == "1h",
+                )
+            )
+        assert row is not None
+        assert row.lp_locked is True
+        assert row.price_usd == Decimal("1.5")
     finally:
         await truncate_pipeline(engine)
         await engine.dispose()
