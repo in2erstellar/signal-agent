@@ -102,6 +102,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         open_pumpportal_socket,
         pumpportal_ws_url,
     )
+    from app.adapters.pumpswap import PumpSwapPools
     from app.adapters.raydium import RaydiumPools
     from app.adapters.token_security import HeliusTokenSecurity
     from app.services.funder_graph import FunderGraphBuilder
@@ -128,7 +129,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     )
     helius = HeliusClient.from_settings(settings)
     raydium = RaydiumPools(settings.raydium_api_base_url)
-    facts = HeliusTokenSecurity(helius, raydium)
+    facts = HeliusTokenSecurity(helius, raydium, PumpSwapPools(helius))
     stop = stop or asyncio.Event()
     graph_slots = asyncio.Semaphore(FUNDER_GRAPH_CONCURRENCY)
 

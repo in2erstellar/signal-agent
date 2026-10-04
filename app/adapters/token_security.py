@@ -4,10 +4,12 @@ Mint and freeze authorities come from ``getAccountInfo`` (jsonParsed).
 Holder rows come from ``getTokenLargestAccounts`` plus the owner program of
 each holder, so pool vaults can be excluded later.
 
-LP custody is read the same way on the pool LP mint from ``RaydiumPools``.
-A balance counts as locked only when its owner is the incinerator burn
-wallet or an account owned by Raydium's Burn & Earn / LP Lock program.
-SPL ``burn`` that only shrinks supply is not visible here.
+LP custody is read the same way on the pool LP mint. Raydium is asked
+first. An empty Raydium list falls through to the canonical PumpSwap pool,
+which supplies the LP mint and vault addresses only. A balance counts as
+locked only when its owner is the incinerator burn wallet or an account
+owned by Raydium's Burn & Earn / LP Lock program. SPL ``burn`` that only
+shrinks supply is not visible here. ``Pool.lp_supply`` is never that supply.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.adapters.helius import HeliusClient, HeliusResponseError
+from app.adapters.pumpswap import PumpSwapPools
 from app.adapters.raydium import RaydiumPools
 
 # https://docs.raydium.io/reference/program-addresses (mainnet-beta).
@@ -76,9 +79,15 @@ class LpBook:
 class HeliusTokenSecurity:
     """Reads mint, holder, and LP-custody facts. The scanner decides what they mean."""
 
-    def __init__(self, helius: HeliusClient, raydium: RaydiumPools) -> None:
+    def __init__(
+        self,
+        helius: HeliusClient,
+        raydium: RaydiumPools,
+        pumpswap: PumpSwapPools | None = None,
+    ) -> None:
         self._helius = helius
         self._raydium = raydium
+        self._pumpswap = pumpswap
 
     async def mint_view(self, mint: str) -> MintView:
         return _mint_view(await self._parsed_account(mint))
@@ -118,7 +127,15 @@ class HeliusTokenSecurity:
 
     async def lp_book(self, mint: str) -> LpBook:
         quote = await self._raydium.pool_quote(mint)
-        if quote.lp_mint is None:
+        lp_mint = quote.lp_mint
+        if lp_mint is None and self._pumpswap is not None:
+            # None means the canonical account is absent (same as an empty
+            # Raydium list). A parse error propagates and is not "no pool".
+            # The mint account read below is the lock-check supply.
+            pool = await self._pumpswap.canonical_pool(mint)
+            if pool is not None:
+                lp_mint = pool.lp_mint
+        if lp_mint is None:
             return LpBook(
                 lp_mint=None,
                 supply_raw=None,
@@ -126,7 +143,7 @@ class HeliusTokenSecurity:
                 liquidity_usd=quote.tvl_usd,
                 price_usd=quote.price_usd,
             )
-        custody = await self.lp_custody(quote.lp_mint)
+        custody = await self.lp_custody(lp_mint)
         return LpBook(
             lp_mint=custody.lp_mint,
             supply_raw=custody.supply_raw,
