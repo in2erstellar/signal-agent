@@ -6,6 +6,7 @@ check reads that result instead of calling Helius a second time.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from decimal import Decimal
@@ -74,6 +75,7 @@ class RiskScanWorker:
         stop: Any | None = None,
         consumer_name: str = "risk-scan",
         retry_backoff_seconds: float = 2.0,
+        scan_slots: asyncio.Semaphore | None = None,
     ) -> None:
         self._sessions = sessions
         self._redis = redis
@@ -83,55 +85,78 @@ class RiskScanWorker:
         self._consumer = consumer_name
         self._group_ready = False
         self._retry_backoff_seconds = retry_backoff_seconds
+        # Whole scan, not a second acquire inside the funder-graph builder.
+        self._scan_slots = scan_slots
 
     async def run_once(self, *, block_ms: int | None = None) -> tuple[int, int]:
         await self._ensure_group()
         messages = await self._read("0", block_ms=None)
         messages.extend(await self._read(">", block_ms=block_ms))
-        processed = 0
-        failed = 0
-        for message_id, fields in messages:
+        if self._scan_slots is None:
+            outcomes: list[tuple[int, int]] = []
+            for message_id, fields in messages:
+                if self._stopping():
+                    break
+                outcomes.append(await self._handle_message_body(message_id, fields))
+        else:
+            tasks = [
+                asyncio.create_task(self._handle_message(message_id, fields))
+                for message_id, fields in messages
+                if not self._stopping()
+            ]
+            outcomes = list(await asyncio.gather(*tasks))
+        processed = sum(item[0] for item in outcomes)
+        failed = sum(item[1] for item in outcomes)
+        logger.info("risk_scan_cycle", processed=processed, failed=failed)
+        return processed, failed
+
+    async def _handle_message(self, message_id: str, fields: dict[str, str]) -> tuple[int, int]:
+        if self._stopping():
+            return 0, 0
+        if self._scan_slots is None:
+            return await self._handle_message_body(message_id, fields)
+        async with self._scan_slots:
             if self._stopping():
-                break
-            mint = str(fields.get("mint") or "")
-            trace_id = str(fields.get("trace_id") or "") or new_trace_id()
-            try:
-                if not mint:
-                    await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
-                    failed += 1
-                    with bind_trace(trace_id):
-                        logger.warning(
-                            "risk_scan_failed",
-                            reason="missing_mint",
-                            message_id=message_id,
-                        )
-                    continue
-                if await self._in_backoff(message_id):
-                    continue
-                started = time.perf_counter()
-                try:
-                    with bind_trace(trace_id):
-                        await self._scan(mint, trace_id)
-                finally:
-                    record_risk_scan_latency(time.perf_counter() - started)
+                return 0, 0
+            return await self._handle_message_body(message_id, fields)
+
+    async def _handle_message_body(self, message_id: str, fields: dict[str, str]) -> tuple[int, int]:
+        mint = str(fields.get("mint") or "")
+        trace_id = str(fields.get("trace_id") or "") or new_trace_id()
+        try:
+            if not mint:
                 await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
-                processed += 1
-            except FunderLookupFailure as exc:
-                failed += 1
-                with bind_trace(trace_id):
-                    await self._handle_lookup_failure(mint, message_id, exc)
-            except Exception as exc:
-                failed += 1
                 with bind_trace(trace_id):
                     logger.warning(
                         "risk_scan_failed",
-                        mint=mint,
+                        reason="missing_mint",
                         message_id=message_id,
-                        error_type=type(exc).__name__,
-                        error=str(exc),
                     )
-        logger.info("risk_scan_cycle", processed=processed, failed=failed)
-        return processed, failed
+                return 0, 1
+            if await self._in_backoff(message_id):
+                return 0, 0
+            started = time.perf_counter()
+            try:
+                with bind_trace(trace_id):
+                    await self._scan(mint, trace_id)
+            finally:
+                record_risk_scan_latency(time.perf_counter() - started)
+            await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
+            return 1, 0
+        except FunderLookupFailure as exc:
+            with bind_trace(trace_id):
+                await self._handle_lookup_failure(mint, message_id, exc)
+            return 0, 1
+        except Exception as exc:
+            with bind_trace(trace_id):
+                logger.warning(
+                    "risk_scan_failed",
+                    mint=mint,
+                    message_id=message_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            return 0, 1
 
     async def _scan(self, mint: str, trace_id: str) -> RiskReport | None:
         async with self._sessions() as session:

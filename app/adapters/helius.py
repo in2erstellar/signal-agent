@@ -14,6 +14,7 @@ accounts) plus ``getMultipleAccounts`` to read each account's owner.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -158,6 +159,12 @@ class HeliusClient:
         self._max_funding_transactions = max_funding_transactions
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=self._timeout)
+        # One in-flight HTTP call. The scan semaphore is wider; this lock
+        # keeps a 429 from becoming three simultaneous RPCs.
+        self._send_lock = asyncio.Lock()
+        self._pause_cv = asyncio.Condition()
+        self._paused_until = 0.0
+        self._now = time.monotonic
 
     @classmethod
     def from_settings(cls, settings: Settings, **kwargs: Any) -> HeliusClient:
@@ -453,45 +460,74 @@ class HeliusClient:
         return body["result"]
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Try up to ``max_attempts`` times. 429 waits for Retry-After when present."""
+        """Try up to ``max_attempts`` times. One 429 pauses every caller.
+
+        Order on 429: record the shared deadline and notify, leave the send
+        lock, then wait. Waiting while the lock is held would wake the other
+        scans one by one and each would send into the same limited window.
+        """
         last_status: int | None = None
-        for attempt in range(self._max_attempts):
-            try:
-                response = await self._client.request(
-                    method,
-                    url,
-                    timeout=self._timeout,
-                    **kwargs,
-                )
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
+        attempt = 0
+        while attempt < self._max_attempts:
+            await self._wait_until_open()
+            async with self._send_lock:
+                if self._now() < self._paused_until:
+                    deferred = True
+                    response: httpx.Response | None = None
+                    transport_error: BaseException | None = None
+                else:
+                    deferred = False
+                    try:
+                        response = await self._client.request(
+                            method,
+                            url,
+                            timeout=self._timeout,
+                            **kwargs,
+                        )
+                        transport_error = None
+                    except (httpx.TimeoutException, httpx.TransportError) as exc:
+                        response = None
+                        transport_error = exc
+                    else:
+                        if response.status_code == 429:
+                            delay = _retry_delay(response.headers, attempt)
+                            logger.warning(
+                                "helius_rate_limited",
+                                method=method,
+                                attempt=attempt + 1,
+                                retry_in_seconds=delay,
+                            )
+                            await response.aclose()
+                            # Notify under the condition, then drop the send
+                            # lock before any caller waits on the deadline.
+                            await self._extend_pause(delay)
+            if deferred:
+                await self._wait_until_open()
+                continue
+            assert response is not None or transport_error is not None
+            if transport_error is not None:
                 logger.warning(
                     "helius_transport_error",
                     method=method,
                     attempt=attempt + 1,
-                    error_type=type(exc).__name__,
+                    error_type=type(transport_error).__name__,
                 )
                 if attempt + 1 >= self._max_attempts:
                     raise HeliusError(
                         f"Helius {method} failed after {self._max_attempts} attempts"
-                    ) from exc
-                await self._sleep(_backoff_seconds(attempt))
+                    ) from transport_error
+                attempt += 1
+                await self._sleep(_backoff_seconds(attempt - 1))
                 continue
-
+            assert response is not None
             last_status = response.status_code
             if response.status_code == 429:
                 if attempt + 1 >= self._max_attempts:
                     raise HeliusRateLimitError(
                         f"Helius rate limited {method} after {self._max_attempts} attempts"
                     )
-                delay = _retry_delay(response.headers, attempt)
-                logger.warning(
-                    "helius_rate_limited",
-                    method=method,
-                    attempt=attempt + 1,
-                    retry_in_seconds=delay,
-                )
-                await response.aclose()
-                await self._sleep(delay)
+                attempt += 1
+                await self._wait_until_open()
                 continue
             if response.status_code in _RETRYABLE_STATUS:
                 logger.warning(
@@ -503,7 +539,8 @@ class HeliusClient:
                 await response.aclose()
                 if attempt + 1 >= self._max_attempts:
                     break
-                await self._sleep(_backoff_seconds(attempt))
+                attempt += 1
+                await self._sleep(_backoff_seconds(attempt - 1))
                 continue
             return response
 
@@ -511,6 +548,31 @@ class HeliusClient:
             last_status or 0,
             f"Helius {method} failed with HTTP {last_status}",
         )
+
+    async def _extend_pause(self, delay: float) -> None:
+        """Push the shared open time out. A shorter delay does not pull it in."""
+        async with self._pause_cv:
+            until = self._now() + max(0.0, delay)
+            if until > self._paused_until:
+                self._paused_until = until
+            self._pause_cv.notify_all()
+
+    async def _wait_until_open(self) -> None:
+        """Sleep until the shared 429 deadline. Concurrent callers share it."""
+        while True:
+            async with self._pause_cv:
+                remaining = self._paused_until - self._now()
+                if remaining <= 0:
+                    return
+                deadline = self._paused_until
+            await self._sleep(remaining)
+            async with self._pause_cv:
+                # A test sleep returns without moving the clock. Real time
+                # does move, so this only clears a deadline the sleep already
+                # covered. A longer deadline armed in between is left alone.
+                if self._paused_until == deadline and self._now() < deadline:
+                    self._paused_until = self._now()
+                    self._pause_cv.notify_all()
 
 
 def _parse_webhook(payload: Any) -> WebhookConfig:

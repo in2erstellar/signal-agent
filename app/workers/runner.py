@@ -169,7 +169,9 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     discovery = TokenDiscovery(sessions, redis, helius)
 
     def funder_factory(session: object) -> FunderGraphBuilder:
-        return FunderGraphBuilder(session, helius, semaphore=graph_slots)  # type: ignore[arg-type]
+        # The scan semaphore already wraps the whole message. Acquiring it
+        # again inside the builder deadlocks: asyncio.Semaphore is not reentrant.
+        return FunderGraphBuilder(session, helius)  # type: ignore[arg-type]
 
     def scanner_factory(session: object, clusters: list[object]) -> RiskScanner:
         del session
@@ -194,7 +196,14 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         model=settings.ai_review_model,
     )
     reviews = AiReviewClient.from_settings(settings)
-    risk = RiskScanWorker(sessions, redis, funder_factory, scanner_factory, stop=stop)
+    risk = RiskScanWorker(
+        sessions,
+        redis,
+        funder_factory,
+        scanner_factory,
+        stop=stop,
+        scan_slots=graph_slots,
+    )
     bait = BaitCheckWorker(sessions, redis, detector_factory, stop=stop)
     outcomes = OutcomeWorker(sessions, redis, raydium, lp_custody=facts, stop=stop)
     fusion = SignalFusion(

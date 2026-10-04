@@ -275,7 +275,7 @@ async def test_rate_limit_retries_with_retry_after() -> None:
         info = await client.get_first_funding_tx("HolderA")
 
     assert calls == 2
-    assert slept == [2.0]
+    assert slept == pytest.approx([2.0], abs=0.05)
     assert info is not None
     assert info.funder == "FunderA"
     assert info.amount_sol == Decimal("0.5")
@@ -315,7 +315,7 @@ async def test_rate_limit_uses_exponential_backoff_without_retry_after() -> None
         info = await client.get_first_funding_tx("HolderB")
 
     assert calls == 3
-    assert slept == [1.0, 2.0]
+    assert slept == pytest.approx([1.0, 2.0], abs=0.05)
     assert info is not None
     assert info.funder == "FunderB"
 
