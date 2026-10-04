@@ -24,7 +24,14 @@ from app.adapters.telegram_bot import (
 )
 from app.db.models import AlertDelivery, Token, TrackedWallet, User
 from app.services.subscriber_settings import parse_settings
-from app.templates import BAIT_WARNING, DISCLAIMER, alert_text, user_welcome_text, welcome_text
+from app.templates import (
+    BAIT_WARNING,
+    DISCLAIMER,
+    alert_text,
+    help_text,
+    user_welcome_text,
+    welcome_text,
+)
 from tests.factories import make_signal, make_token, make_user
 from tests.pipeline_containers import truncate_pipeline
 
@@ -298,7 +305,7 @@ async def test_signals_and_stored_risk_are_readable(sessions: object) -> None:
     context.args = [mint]
     await cmd_risk(risk, context)
     body = risk.message.reply_text.await_args.args[0]
-    assert "risk_score: 80" in body
+    assert "risk_score: <code>80</code>" in body
     assert "check_lp_lock" in body
     assert "does not mean the token is safe" in body
     async with sessions() as session:  # type: ignore[operator]
@@ -335,10 +342,11 @@ async def test_alert_text_shows_the_score_the_mint_link_and_the_bait_warning() -
         bait_warning=True,
     )
     assert "<b>BONK</b>" in text
-    assert "<b>72.5</b>" in text
+    assert "<b><code>72.5</code></b>" in text
     assert f"https://solscan.io/token/{mint}" in text
-    assert "EPjF...Dt1v" in text
-    assert "risk_score: 85" in text
+    assert f"<code>{mint}</code>" in text
+    assert ">Solscan</a>" in text
+    assert "risk_score: <code>85</code>" in text
     assert "check_funder_cluster_exposure" in text
     assert f"<b>{BAIT_WARNING}</b>" in text
     assert text.endswith(DISCLAIMER)
@@ -352,3 +360,46 @@ async def test_alert_text_shows_the_score_the_mint_link_and_the_bait_warning() -
         bait_warning=False,
     )
     assert BAIT_WARNING not in quiet
+
+
+def test_alert_card_groups_ready_data_without_rewriting_reasons() -> None:
+    mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    text = alert_text(
+        symbol="BONK <dev>",
+        mint=mint,
+        composite_score=Decimal("72.5"),
+        risk_score=Decimal("60"),
+        risk_flags=["check_lp_lock:unavailable", "check_holder_concentration"],
+        bait_warning=False,
+        creator_over_limit=True,
+        context={
+            "creator": "Wallet<A>&B",
+            "launches_since_tracking": 3,
+            "lp_stayed_shown": "2 of 3",
+            "price_drop_shown": "unavailable (no pool yet)",
+            "median_sell_shown": "unavailable (not in the tracked-wallet ledger)",
+            "distribution_status": "unavailable",
+            "distribution_reason": "holder_funder_missing",
+        },
+    )
+    assert "🟡 <b>BONK &lt;dev&gt;</b>" in text
+    assert f"<code>{mint}</code>" in text
+    assert ">Solscan</a>" in text
+    assert "https://solscan.io/token/" in text
+    assert "<code>72.5</code>" in text
+    assert "<code>60</code>" in text
+    assert "👤 <b>Creator cluster</b>" in text
+    assert "<code>Wallet&lt;A&gt;&amp;B</code>" in text
+    assert "⚪ unavailable (no pool yet)" in text
+    assert "⚪ unavailable (not in the tracked-wallet ledger)" in text
+    assert "⚪ unavailable (holder_funder_missing)" in text
+    assert "⚪ check_lp_lock:unavailable" in text
+    assert "⚠️ Creator-funder supply is above your limit." in text
+    assert "LP stayed locked, since tracking started: <code>2 of 3</code>" in text
+    assert "🔒 LP locked" not in text
+    assert text.index("risk_score:") < text.index("Creator cluster") < text.index("<b>LP</b>")
+    help_body = help_text()
+    assert "⚪ <b>unavailable (no pool yet)</b>" in help_body
+    assert "⚙️ /settings" in help_body
+    assert "📡 /signals" in help_body
+    assert "🛡 /risk mint" in help_body

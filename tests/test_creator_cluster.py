@@ -82,7 +82,8 @@ def test_card_counts_launches_since_tracking_and_keeps_the_long_note_in_help() -
             "distribution_share": None,
         }
     )
-    assert "Previous launches since tracking started: 3" in text
+    assert "Previous launches since tracking started: <code>3</code>" in text
+    assert "👤 <b>Creator cluster</b>" in text
     assert "unavailable (no pool yet)" in text
     assert "Most pump.fun tokens" not in text
     assert "scanned holders: 0%" not in text
@@ -369,7 +370,7 @@ def test_over_limit_needs_a_measured_share() -> None:
         {"distribution_status": "measured", "distribution_share": "0.40"},
         Decimal("0.25"),
     )
-    assert creator_block_text(
+    measured = creator_block_text(
         {
             "creator": "CreatorWallet",
             "launches_since_tracking": 0,
@@ -381,4 +382,6 @@ def test_over_limit_needs_a_measured_share() -> None:
             "distribution_reason": None,
         },
         over_limit=False,
-    ).endswith("0%")
+    )
+    assert "scanned holders: <code>0%</code>" in measured
+    assert "above your limit" not in measured

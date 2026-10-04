@@ -18,12 +18,20 @@ from app.config import (
 from app.ui_constants import (
     ICON_BAIT_WARNING,
     ICON_CANCEL,
+    ICON_CREATOR,
+    ICON_DISTRIBUTION,
+    ICON_LP_LOCKED,
+    ICON_LP_PENDING,
+    ICON_LP_UNLOCKED,
+    ICON_RISK,
     ICON_RISK_HIGH,
     ICON_RISK_LOW,
     ICON_RISK_MED,
+    ICON_SECTION,
     ICON_SETTINGS,
     ICON_SIGNAL,
     ICON_STATUS,
+    ICON_UNAVAILABLE,
     ICON_WALLET,
 )
 
@@ -101,18 +109,18 @@ def settings_text(
         f"🎯 <b>Score floor</b>  {format_score(min_score)}\n"
         "Alert when the composite score is at least this.\n"
         "\n"
-        f"🛡 <b>Risk cap</b>  {format_score(max_risk)}\n"
+        f"{ICON_RISK} <b>Risk cap</b>  {format_score(max_risk)}\n"
         "Highest risk points you still accept (100 − risk score).\n"
         "100 lets every scanned token through. 0 keeps a clean scan only.\n"
         "\n"
         f"🔔 <b>Alerts</b>  {alerts}\n"
         "\n"
-        f"👥 <b>Creator-funder limit</b>  {format_share(max_dev_cluster_share)}\n"
+        f"{ICON_CREATOR} <b>Creator-funder limit</b>  {format_share(max_dev_cluster_share)}\n"
         "Shown on its own line when scanned supply on that funder is above this. "
         "It does not change the score.\n"
         "\n"
         "Presets set the score floor and the risk cap.\n"
-        "🔒 Strict 70 / 25 · ⚖️ Balanced 50 / 60 · 🌊 Wide 30 / 100"
+        f"{ICON_LP_LOCKED} Strict 70 / 25 · ⚖️ Balanced 50 / 60 · 🌊 Wide 30 / 100"
     )
 
 
@@ -130,8 +138,8 @@ def status_text(
         "\n"
         f"🔔 Alerts: {state}\n"
         f"🎯 Score floor: {format_score(min_score)}\n"
-        f"🛡 Risk cap: {format_score(max_risk)}\n"
-        f"👥 Creator-funder limit: {format_share(max_dev_cluster_share)}\n"
+        f"{ICON_RISK} Risk cap: {format_score(max_risk)}\n"
+        f"{ICON_CREATOR} Creator-funder limit: {format_share(max_dev_cluster_share)}\n"
         f"📨 Last 24 hours: {alerts_24h}"
     )
 
@@ -140,10 +148,10 @@ def unlock_alert_text(*, symbol: str | None, mint: str, unlock_at: datetime) -> 
     when = unlock_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     name = escape(symbol or "no ticker")
     return (
-        f"⏳ <b>{name}</b>\n"
+        f"{ICON_LP_PENDING} <b>{name}</b>\n"
         f"{solscan_token(mint)}\n"
         "\n"
-        f"LP unlock is recorded for {when}. "
+        f"LP unlock is recorded for {_code(when)}. "
         "This is a schedule reading, not a prediction of the price."
     )
 
@@ -151,7 +159,7 @@ def unlock_alert_text(*, symbol: str | None, mint: str, unlock_at: datetime) -> 
 def data_incomplete_text(*, mint: str, missing: list[str]) -> str:
     fields = ", ".join(escape(field) for field in missing) if missing else "unknown"
     return (
-        f"⚠️ <b>data incomplete: {fields}</b>\n"
+        f"{ICON_UNAVAILABLE} <b>data incomplete: {fields}</b>\n"
         f"{solscan_token(mint)}\n"
         "\n"
         "The source for these fields did not return them, so this is not a score. "
@@ -162,21 +170,23 @@ def data_incomplete_text(*, mint: str, missing: list[str]) -> str:
 def creator_block_text(context: dict[str, object] | None, *, over_limit: bool = False) -> str:
     """Creator-cluster lines. They are not a substitute for the score."""
     if not context or not context.get("creator"):
-        return "<b>Creator cluster</b>\nunavailable (creator missing)"
-    share_line = _distribution_line(context)
+        return (
+            f"{ICON_CREATOR} <b>Creator cluster</b>\n"
+            f"{ICON_UNAVAILABLE} unavailable (creator missing)"
+        )
     lines = [
-        "<b>Creator cluster</b>",
-        f"Creator: {escape(str(context['creator']))}",
-        f"Previous launches since tracking started: {context.get('launches_since_tracking', 0)}",
-        "LP stayed locked, since tracking started: " + str(context.get("lp_stayed_shown", "unavailable")),
+        f"{ICON_CREATOR} <b>Creator cluster</b>",
+        f"Creator: {_code(context['creator'])}",
+        "Previous launches since tracking started: "
+        + _code(context.get("launches_since_tracking", 0)),
         "First-hour drop over 90%, since tracking started: "
-        + str(context.get("price_drop_shown", "unavailable")),
+        + _reading(context.get("price_drop_shown", "unavailable")),
         "Median time to first sell by the creator or a linked wallet: "
-        + str(context.get("median_sell_shown", "unavailable")),
-        share_line,
+        + _reading(context.get("median_sell_shown", "unavailable")),
+        _distribution_line(context),
     ]
     if over_limit:
-        lines.append("Creator-funder supply is above your limit.")
+        lines.append(f"{ICON_DISTRIBUTION} Creator-funder supply is above your limit.")
     return "\n".join(lines)
 
 
@@ -184,27 +194,30 @@ def help_text() -> str:
     return (
         f"{ICON_SIGNAL} <b>Help</b>\n"
         "\n"
-        "A score uses the checks that returned data. "
-        "A line that says unavailable was not filled in with a default.\n"
+        f"{ICON_UNAVAILABLE} A score uses the checks that returned data.\n"
+        f"{ICON_UNAVAILABLE} A line that says unavailable was not filled in with a default.\n"
         "\n"
-        "<b>unavailable (no pool yet)</b>\n"
+        f"{ICON_UNAVAILABLE} <b>unavailable (no pool yet)</b>\n"
         "Most pump.fun tokens never open a Raydium pool. "
         "No pool means no price snapshot. That is expected, not a failed lookup.\n"
         "\n"
-        "<b>unavailable (price lookup failed)</b>\n"
+        f"{ICON_UNAVAILABLE} <b>unavailable (price lookup failed)</b>\n"
         "A pool was expected and the Raydium request failed or omitted the price. "
         "That one is worth a look in the logs.\n"
         "\n"
-        "Previous launches count only mints stored since tracking started.\n"
-        "Median time to first sell stays unavailable. "
+        f"{ICON_CREATOR} Previous launches count only mints stored since tracking started.\n"
+        f"{ICON_UNAVAILABLE} Median time to first sell stays unavailable. "
         "That is the limit of the field: only sells already stored for wallets "
         "you track would count, and those rows are not turned into a median.\n"
-        "The creator-funder share is not added to the score. "
+        f"{ICON_DISTRIBUTION} The creator-funder share is not added to the score. "
         "Above your limit, the card says so on its own line.\n"
         "\n"
-        "/settings — score floor, risk cap, creator-funder limit\n"
-        "/signals — latest signals\n"
-        "/risk mint — stored scan"
+        f"{ICON_SETTINGS} /settings — score floor, risk cap, creator-funder limit\n"
+        f"{ICON_SIGNAL} /signals — latest signals\n"
+        f"{ICON_STATUS} /status — alerts, floors, and the last 24 hours\n"
+        f"{ICON_RISK} /risk mint — stored scan\n"
+        f"{ICON_WALLET} /wallets — watched wallets\n"
+        f"{ICON_SIGNAL} /menu — buttons for the same screens"
     )
 
 
@@ -220,33 +233,36 @@ def alert_text(
     context: dict[str, object] | None = None,
     creator_over_limit: bool = False,
 ) -> str:
-    flags = ", ".join(escape(flag) for flag in risk_flags) if risk_flags else "none"
     risk = "—" if risk_score is None else format_score(risk_score)
+    other_flags, lp_flags = _split_lp_flags(risk_flags)
     lines = [
         f"{risk_icon(risk_score)} <b>{escape(symbol or 'no ticker')}</b>",
         solscan_token(mint),
         "",
-        f"<b>{format_score(composite_score)}</b>",
-        f"risk_score: {risk}",
-        f"risk_flags: {flags}",
+        ICON_SECTION,
+        f"<b>{_code(format_score(composite_score))}</b>",
+        f"risk_score: {_code(risk)}",
+        *_flag_block("risk_flags", other_flags, lp_flags),
     ]
     if bait_warning:
         lines.extend(["", f"<b>{BAIT_WARNING}</b>"])
     if context is not None:
-        lines.extend(["", creator_block_text(context, over_limit=creator_over_limit)])
+        lines.extend(["", ICON_SECTION, creator_block_text(context, over_limit=creator_over_limit)])
+    lines.extend(_lp_section(context, lp_flags))
     lines.extend(_review_lines(ai_review))
     lines.extend(["", DISCLAIMER])
     return "\n".join(lines)
 
 
 def _distribution_line(context: dict[str, object]) -> str:
+    label = "Supply on the creator's funder, scanned holders"
     status = context.get("distribution_status")
     if status == "measured" and context.get("distribution_share") is not None:
         share = Decimal(str(context["distribution_share"]))
         percent = (share * Decimal(100)).quantize(Decimal("1"))
-        return f"Supply on the creator's funder, scanned holders: {percent}%"
+        return f"{label}: {_code(f'{percent}%')}"
     reason = context.get("distribution_reason") or "missing"
-    return f"Supply on the creator's funder, scanned holders: unavailable ({reason})"
+    return f"{label}: {ICON_UNAVAILABLE} unavailable ({reason})"
 
 
 def risk_card_text(
@@ -259,29 +275,110 @@ def risk_card_text(
     composite_score: Decimal | None = None,
     triggered_at: datetime | None = None,
     ai_review: str | None = None,
+    context: dict[str, object] | None = None,
+    creator_over_limit: bool = False,
 ) -> str:
-    listed = ", ".join(escape(flag) for flag in flags) if flags else "none"
     risk = "—" if risk_score is None else format_score(risk_score)
+    other_flags, lp_flags = _split_lp_flags(flags)
     lines = [
         f"{risk_icon(risk_score)} <b>{escape(symbol or 'no ticker')}</b>",
         solscan_token(mint),
+        "",
+        ICON_SECTION,
     ]
     if composite_score is not None:
-        lines.append(f"composite_score: <b>{format_score(composite_score)}</b>")
+        lines.append(f"composite_score: <b>{_code(format_score(composite_score))}</b>")
     if triggered_at is not None:
-        lines.append(triggered_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+        when = triggered_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(_code(when))
     lines.extend(
         [
-            f"risk_score: {risk}",
-            f"flags: {listed}",
+            f"risk_score: {_code(risk)}",
+            *_flag_block("flags", other_flags, lp_flags),
             STORED_SCAN_NOTE,
         ]
     )
     if bait_warning:
         lines.extend(["", f"<b>{BAIT_WARNING}</b>"])
+    if context is not None:
+        lines.extend(["", ICON_SECTION, creator_block_text(context, over_limit=creator_over_limit)])
+    lines.extend(_lp_section(context, lp_flags))
     lines.extend(_review_lines(ai_review))
     lines.extend(["", DISCLAIMER])
     return "\n".join(lines)
+
+
+def _split_lp_flags(flags: list[str]) -> tuple[list[str], list[str]]:
+    other: list[str] = []
+    lp: list[str] = []
+    for flag in flags:
+        if flag == "check_lp_lock" or flag.startswith("check_lp_lock:"):
+            lp.append(flag)
+        else:
+            other.append(flag)
+    return other, lp
+
+
+def _flag_block(label: str, other: list[str], lp: list[str]) -> list[str]:
+    if not other and not lp:
+        return [f"{label}: none"]
+    if not other:
+        return []
+    return [f"{label}:", *(_flag_line(flag) for flag in other)]
+
+
+def _flag_line(flag: str) -> str:
+    safe = escape(flag)
+    if flag.endswith(":unavailable"):
+        return f"{ICON_UNAVAILABLE} {safe}"
+    if flag == "check_lp_lock":
+        return f"{ICON_LP_UNLOCKED} {safe}"
+    return safe
+
+
+def _lp_section(context: dict[str, object] | None, lp_flags: list[str]) -> list[str]:
+    body: list[str] = []
+    if context and context.get("creator"):
+        body.append(_lp_history_line(str(context.get("lp_stayed_shown", "unavailable"))))
+    body.extend(_flag_line(flag) for flag in lp_flags)
+    if not lp_flags:
+        body.append(f"{ICON_LP_LOCKED} LP locked")
+    if not body:
+        return []
+    return ["", ICON_SECTION, "<b>LP</b>", *body]
+
+
+def _lp_history_line(shown: str) -> str:
+    label = "LP stayed locked, since tracking started"
+    if shown.startswith("unavailable"):
+        return f"{ICON_UNAVAILABLE} {label}: {escape(shown)}"
+    icon = _lp_measured_icon(shown)
+    prefix = f"{icon} " if icon else ""
+    return f"{prefix}{label}: {_code(shown)}"
+
+
+def _lp_measured_icon(shown: str) -> str:
+    left, sep, right = shown.partition(" of ")
+    if not sep or not left.isdigit() or not right.isdigit():
+        return ICON_LP_LOCKED
+    stayed = int(left)
+    total = int(right)
+    if total > 0 and stayed == total:
+        return ICON_LP_LOCKED
+    if stayed == 0:
+        return ICON_LP_UNLOCKED
+    return ""
+
+
+def _reading(value: object) -> str:
+    shown = str(value)
+    if shown.startswith("unavailable"):
+        return f"{ICON_UNAVAILABLE} {escape(shown)}"
+    return _code(shown)
+
+
+def _code(value: object) -> str:
+    return f"<code>{escape(str(value))}</code>"
 
 
 _MARKDOWN_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
@@ -441,4 +538,7 @@ def solscan_account(address: str) -> str:
 
 def _solscan(kind: str, value: str) -> str:
     href = escape(value, quote=True)
-    return f'<a href="https://solscan.io/{kind}/{href}">{escape(short_address(value))}</a>'
+    return (
+        f"<code>{escape(value)}</code>\n"
+        f'<a href="https://solscan.io/{kind}/{href}">Solscan</a>'
+    )

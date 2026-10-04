@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -49,6 +50,7 @@ from app.config import (
     SIGNAL_PAGE_SIZE,
 )
 from app.db.models import AlertDelivery, BaitFlag, Signal, Token, TrackedWallet, User, WalletTx
+from app.services.creator_cluster import share_above_limit
 from app.services.dialog_state import clear_pending_input, get_pending_input, set_pending_input
 from app.services.risk_scanner import unavailable_fields
 from app.services.subscriber_settings import ALERT_PRESETS, AlertPrefs, parse_settings, with_updates
@@ -92,6 +94,7 @@ from app.ui_constants import (
     ICON_CANCEL,
     ICON_CONFIRM,
     ICON_DELETE,
+    ICON_RISK,
     ICON_SETTINGS,
     ICON_SIGNAL,
     ICON_STATUS,
@@ -204,6 +207,23 @@ def parse_callback(data: str) -> tuple[str, tuple[str, ...]] | None:
     return parts[0], tuple(parts[1:])
 
 
+BOT_COMMANDS = (
+    BotCommand("menu", f"{ICON_SIGNAL} Menu"),
+    BotCommand("signals", f"{ICON_SIGNAL} Latest signals"),
+    BotCommand("settings", f"{ICON_SETTINGS} Score floor and risk cap"),
+    BotCommand("status", f"{ICON_STATUS} Alert status"),
+    BotCommand("risk", f"{ICON_RISK} Stored scan for a mint"),
+    BotCommand("help", f"{ICON_SIGNAL} How a card is read"),
+    BotCommand("wallets", f"{ICON_WALLET} Watched wallets"),
+    BotCommand("watch", f"{ICON_ADD} Add a wallet"),
+    BotCommand("unwatch", f"{ICON_DELETE} Remove a wallet"),
+)
+
+
+async def _publish_commands(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
+    await application.bot.set_my_commands(list(BOT_COMMANDS))
+
+
 def build_application(
     token: str,
     sessions: async_sessionmaker[AsyncSession],
@@ -212,7 +232,7 @@ def build_application(
     admins: frozenset[int] | None = None,
     redis: object | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).post_init(_publish_commands).build()
     application.bot_data["sessions"] = sessions
     application.bot_data["clock"] = clock or (lambda: datetime.now(timezone.utc))
     application.bot_data["admins"] = admins if admins is not None else frozenset()
@@ -721,7 +741,15 @@ async def _show_signal(
         composite = signal.composite_score
         triggered_at = signal.triggered_at
         risk_score = signal.risk_score if signal.risk_score is not None else token.risk_score
-        flags = _failed_flags(token)
+        raw_flags = token.risk_flags if isinstance(token.risk_flags, list) else []
+        flags = [str(flag) for flag in raw_flags]
+        stored = signal.context if isinstance(signal.context, dict) else None
+        over_limit = False
+        viewer = query.from_user
+        if stored is not None and viewer is not None and isinstance(viewer.id, int):
+            prefs = await _prefs_for(context, viewer.id)
+            if prefs is not None:
+                over_limit = share_above_limit(stored, prefs.max_dev_cluster_share)
         text = risk_card_text(
             symbol=symbol,
             mint=mint,
@@ -731,6 +759,8 @@ async def _show_signal(
             composite_score=composite,
             triggered_at=triggered_at,
             ai_review=_stored_review(token),
+            context=stored,
+            creator_over_limit=over_limit,
         )
     back = InlineKeyboardButton("◀️ Back", callback_data=f"s:page:{page}")
     await _edit(query, text, InlineKeyboardMarkup([[back], [_menu_button()]]))
