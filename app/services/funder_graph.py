@@ -268,6 +268,50 @@ class FunderGraphBuilder:
         self._helius = helius
         self._semaphore = semaphore
 
+    async def root_for_wallet(self, address: str) -> str | None:
+        """Funder root for one wallet, including the creator when they are not a top holder.
+
+        Hop 1 is stored on a miss. Hop 2 is used when that edge is already stored
+        or the lookup succeeds. A failed lookup of hop 1 leaves the root unknown.
+        """
+        try:
+            direct = await self._load_cached_funding(address)
+            if direct is None:
+                direct = await self._helius.find_first_funding_tx(address)
+                if direct is None:
+                    logger.warning("creator_funder_unavailable", wallet=address, reason="no_funder")
+                    return None
+                await self._insert_edge(address, direct, hop_depth=1)
+        except Exception as exc:
+            failure = funder_lookup_failure(address, exc)
+            if failure is None:
+                raise
+            logger.warning(
+                "creator_funder_unavailable",
+                wallet=address,
+                reason=str(failure),
+            )
+            return None
+        parent = await self._load_cached_funding(direct.funder)
+        if parent is not None:
+            return parent.funder
+        try:
+            parent_info = await self._helius.find_first_funding_tx(direct.funder)
+        except Exception as exc:
+            failure = funder_lookup_failure(direct.funder, exc)
+            if failure is None:
+                raise
+            logger.warning(
+                "creator_funder_unavailable",
+                wallet=address,
+                reason=str(failure),
+            )
+            return direct.funder
+        if parent_info is None or parent_info.funder == direct.funder:
+            return direct.funder
+        await self._insert_edge(direct.funder, parent_info, hop_depth=2)
+        return parent_info.funder
+
     async def build_graph_for_token(
         self,
         token_mint: str,

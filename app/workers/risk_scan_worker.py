@@ -20,7 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import MAX_FUNDER_LOOKUP_RETRIES, RISK_SCAN_GROUP, RISK_SCAN_QUEUE
 from app.db.models import FunderCluster, Token
 from app.observability import bind_trace, new_trace_id, record_risk_scan_latency
+from app.services.creator_cluster import measure_distribution
 from app.services.funder_graph import FunderLookupFailure
+from app.services.lp_unlock import LpCustody, classify_lp_custody
+from app.services.outcome_jobs import record_listing, record_lp_unlock
 from app.services.risk_scanner import RiskReport, RiskScanner
 from app.services.token_store import (
     FUNDER_GRAPH_BUILT,
@@ -166,7 +169,8 @@ class RiskScanWorker:
                         )
                     elif token is not None and prior is None:
                         token.funder_graph_status = FUNDER_GRAPH_BUILT
-                report = await self._scanner_factory(session, list(clusters)).scan_token(mint)
+                scanner = self._scanner_factory(session, list(clusters))
+                report = await scanner.scan_token(mint)
                 if token is None:
                     token = Token(mint=mint, first_seen_at=report.scanned_at)
                     session.add(token)
@@ -184,6 +188,31 @@ class RiskScanWorker:
                     risk_score=report.risk_score,
                     risk_flags=token.risk_flags,
                 )
+                builder = self._funder_factory(session)
+                dev_root = None
+                if token.creator_address and hasattr(builder, "root_for_wallet"):
+                    dev_root = await builder.root_for_wallet(token.creator_address)
+                await measure_distribution(
+                    session,
+                    token,
+                    getattr(scanner, "holder_book", None),
+                    dev_root=dev_root,
+                )
+                seen_at = report.scanned_at
+                await record_listing(
+                    session,
+                    self._redis,
+                    token,
+                    pool_status=report.pool_status,
+                    price_usd=report.price_usd,
+                    seen_at=seen_at,
+                )
+                lp_book = getattr(scanner, "lp_book", None)
+                rows = [] if lp_book is None else [
+                    LpCustody(row.is_burn_address, row.is_lock_program, row.amount_raw)
+                    for row in lp_book.rows
+                ]
+                await record_lp_unlock(session, token, classify_lp_custody(rows))
         return report
 
     async def _handle_lookup_failure(

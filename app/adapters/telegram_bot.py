@@ -41,8 +41,10 @@ from app.api.schemas import WalletCreate
 from app.api.token_risk import report_from_token
 from app.config import (
     ALERT_CHAT_INTERVAL_SECONDS,
+    DEFAULT_MAX_DEV_CLUSTER_SHARE,
     DEFAULT_MAX_RISK,
     DEFAULT_MIN_SCORE,
+    DEV_CLUSTER_SHARE_STEP,
     SETTINGS_STEP,
     SIGNAL_PAGE_SIZE,
 )
@@ -55,6 +57,8 @@ from app.templates import (
     admin_restricted_text,
     data_incomplete_text,
     format_score,
+    format_share,
+    help_text,
     menu_text,
     risk_card_text,
     risk_missing_text,
@@ -214,6 +218,7 @@ def build_application(
     application.bot_data["admins"] = admins if admins is not None else frozenset()
     application.bot_data["redis"] = redis
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("menu", cmd_menu))
     application.add_handler(CommandHandler("settings", cmd_settings))
     application.add_handler(CommandHandler("status", cmd_status))
@@ -277,6 +282,7 @@ def settings_markup(
     max_risk: Decimal,
     *,
     active: bool,
+    max_dev_cluster_share: Decimal = DEFAULT_MAX_DEV_CLUSTER_SHARE,
 ) -> InlineKeyboardMarkup:
     step = format_score(SETTINGS_STEP)
     alerts = "🔔 Alerts: on" if active else "🔕 Alerts: paused"
@@ -294,6 +300,12 @@ def settings_markup(
                 InlineKeyboardButton(f"− {step}", callback_data="set:max:-"),
                 InlineKeyboardButton(format_score(max_risk), callback_data="set:hold"),
                 InlineKeyboardButton(f"+ {step}", callback_data="set:max:+"),
+            ],
+            [InlineKeyboardButton("👥 Creator-funder limit", callback_data="set:hold")],
+            [
+                InlineKeyboardButton("− 5%", callback_data="set:dev:-"),
+                InlineKeyboardButton(format_share(max_dev_cluster_share), callback_data="set:hold"),
+                InlineKeyboardButton("+ 5%", callback_data="set:dev:+"),
             ],
             [InlineKeyboardButton(alerts, callback_data=f"set:live:{toggle}")],
             [
@@ -360,6 +372,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await _send(message, user_welcome_text())
     await _send_menu(message, admin=role == "admin")
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await _send(message, help_text())
 
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -504,6 +523,10 @@ async def _route_settings(
     if len(rest) == 2 and rest[0] in {"min", "max"} and rest[1] in {"+", "-"}:
         delta = SETTINGS_STEP if rest[1] == "+" else -SETTINGS_STEP
         await _adjust_setting(context, query, telegram_id, rest[0], delta)
+        return True
+    if len(rest) == 2 and rest[0] == "dev" and rest[1] in {"+", "-"}:
+        delta = DEV_CLUSTER_SHARE_STEP if rest[1] == "+" else -DEV_CLUSTER_SHARE_STEP
+        await _adjust_setting(context, query, telegram_id, "dev", delta)
         return True
     if rest[0] == "live" and len(rest) == 2 and rest[1] in {"on", "off"}:
         await _set_alerts(context, query, telegram_id, rest[1] == "on")
@@ -741,11 +764,7 @@ async def _show_settings(
     if prefs is None:
         await _edit(query, unregistered_text())
         return
-    await _edit(
-        query,
-        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk, active=prefs.active),
-        settings_markup(prefs.min_score, prefs.max_risk, active=prefs.active),
-    )
+    await _edit(query, *_settings_view(prefs))
 
 
 async def _adjust_setting(
@@ -755,7 +774,12 @@ async def _adjust_setting(
     field: str,
     delta: Decimal,
 ) -> None:
-    key = "min_score" if field == "min" else "max_risk"
+    if field == "dev":
+        key = "max_dev_cluster_share"
+        ceiling = Decimal(1)
+    else:
+        key = "min_score" if field == "min" else "max_risk"
+        ceiling = Decimal(100)
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
     async with sessions() as session:
         async with session.begin():
@@ -764,20 +788,19 @@ async def _adjust_setting(
                 await _edit(query, unregistered_text())
                 return
             prefs = parse_settings(row.settings)
-            current = prefs.min_score if field == "min" else prefs.max_risk
+            if field == "dev":
+                current = prefs.max_dev_cluster_share
+            elif field == "min":
+                current = prefs.min_score
+            else:
+                current = prefs.max_risk
             updated = current + delta
-            if updated < 0 or updated > 100:
+            if updated < 0 or updated > ceiling:
                 return
             row.settings = with_updates(row.settings, **{key: updated})
             prefs = parse_settings(row.settings)
-            min_score = prefs.min_score
-            max_risk = prefs.max_risk
-            active = prefs.active
-    await _edit(
-        query,
-        settings_text(min_score=min_score, max_risk=max_risk, active=active),
-        settings_markup(min_score, max_risk, active=active),
-    )
+            painted = _settings_view(prefs)
+    await _edit(query, *painted)
 
 
 async def _set_alerts(
@@ -814,13 +837,24 @@ async def _write_prefs(
                 return
             row.settings = with_updates(row.settings, **changes)
             prefs = parse_settings(row.settings)
-            min_score = prefs.min_score
-            max_risk = prefs.max_risk
-            active = prefs.active
-    await _edit(
-        query,
-        settings_text(min_score=min_score, max_risk=max_risk, active=active),
-        settings_markup(min_score, max_risk, active=active),
+            painted = _settings_view(prefs)
+    await _edit(query, *painted)
+
+
+def _settings_view(prefs: AlertPrefs) -> tuple[str, InlineKeyboardMarkup]:
+    return (
+        settings_text(
+            min_score=prefs.min_score,
+            max_risk=prefs.max_risk,
+            active=prefs.active,
+            max_dev_cluster_share=prefs.max_dev_cluster_share,
+        ),
+        settings_markup(
+            prefs.min_score,
+            prefs.max_risk,
+            active=prefs.active,
+            max_dev_cluster_share=prefs.max_dev_cluster_share,
+        ),
     )
 
 
@@ -856,11 +890,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if prefs is None:
         await _send(message, unregistered_text())
         return
-    await _send(
-        message,
-        settings_text(min_score=prefs.min_score, max_risk=prefs.max_risk, active=prefs.active),
-        settings_markup(prefs.min_score, prefs.max_risk, active=prefs.active),
-    )
+    text, markup = _settings_view(prefs)
+    await _send(message, text, markup)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -980,11 +1011,13 @@ async def _status_body(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> 
         min_score = prefs.min_score
         max_risk = prefs.max_risk
         active = prefs.active
+        dev_share = prefs.max_dev_cluster_share
     return status_text(
         min_score=min_score,
         max_risk=max_risk,
         active=active,
         alerts_24h=int(alerts_24h or 0),
+        max_dev_cluster_share=dev_share,
     )
 
 

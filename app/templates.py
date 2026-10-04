@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from html import escape
 
-from app.config import FOOTER_DISCLAIMER, RISK_ICON_LOW_MAX, RISK_ICON_MED_MAX
+from app.config import (
+    DEFAULT_MAX_DEV_CLUSTER_SHARE,
+    FOOTER_DISCLAIMER,
+    RISK_ICON_LOW_MAX,
+    RISK_ICON_MED_MAX,
+)
 from app.ui_constants import (
     ICON_BAIT_WARNING,
     ICON_CANCEL,
@@ -82,7 +87,13 @@ def unregistered_text() -> str:
     return "Send /start first to subscribe to signals."
 
 
-def settings_text(*, min_score: Decimal, max_risk: Decimal, active: bool) -> str:
+def settings_text(
+    *,
+    min_score: Decimal,
+    max_risk: Decimal,
+    active: bool,
+    max_dev_cluster_share: Decimal = DEFAULT_MAX_DEV_CLUSTER_SHARE,
+) -> str:
     alerts = "on" if active else "paused"
     return (
         f"{ICON_SETTINGS} <b>Settings</b>\n"
@@ -96,7 +107,11 @@ def settings_text(*, min_score: Decimal, max_risk: Decimal, active: bool) -> str
         "\n"
         f"🔔 <b>Alerts</b>  {alerts}\n"
         "\n"
-        "Presets set both numbers at once.\n"
+        f"👥 <b>Creator-funder limit</b>  {format_share(max_dev_cluster_share)}\n"
+        "Shown on its own line when scanned supply on that funder is above this. "
+        "It does not change the score.\n"
+        "\n"
+        "Presets set the score floor and the risk cap.\n"
         "🔒 Strict 70 / 25 · ⚖️ Balanced 50 / 60 · 🌊 Wide 30 / 100"
     )
 
@@ -107,6 +122,7 @@ def status_text(
     max_risk: Decimal,
     active: bool,
     alerts_24h: int,
+    max_dev_cluster_share: Decimal = DEFAULT_MAX_DEV_CLUSTER_SHARE,
 ) -> str:
     state = "on" if active else "paused"
     return (
@@ -115,7 +131,20 @@ def status_text(
         f"🔔 Alerts: {state}\n"
         f"🎯 Score floor: {format_score(min_score)}\n"
         f"🛡 Risk cap: {format_score(max_risk)}\n"
+        f"👥 Creator-funder limit: {format_share(max_dev_cluster_share)}\n"
         f"📨 Last 24 hours: {alerts_24h}"
+    )
+
+
+def unlock_alert_text(*, symbol: str | None, mint: str, unlock_at: datetime) -> str:
+    when = unlock_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    name = escape(symbol or "no ticker")
+    return (
+        f"⏳ <b>{name}</b>\n"
+        f"{solscan_token(mint)}\n"
+        "\n"
+        f"LP unlock is recorded for {when}. "
+        "This is a schedule reading, not a prediction of the price."
     )
 
 
@@ -130,6 +159,52 @@ def data_incomplete_text(*, mint: str, missing: list[str]) -> str:
     )
 
 
+def creator_block_text(context: dict[str, object] | None, *, over_limit: bool = False) -> str:
+    """Creator-cluster lines. They are not a substitute for the score."""
+    if not context or not context.get("creator"):
+        return "<b>Creator cluster</b>\nunavailable (creator missing)"
+    share_line = _distribution_line(context)
+    lines = [
+        "<b>Creator cluster</b>",
+        f"Creator: {escape(str(context['creator']))}",
+        f"Previous launches since tracking started: {context.get('launches_since_tracking', 0)}",
+        "LP stayed locked, since tracking started: " + str(context.get("lp_stayed_shown", "unavailable")),
+        "First-hour drop over 90%, since tracking started: "
+        + str(context.get("price_drop_shown", "unavailable")),
+        "Median time to first sell by the creator or a linked wallet: "
+        + str(context.get("median_sell_shown", "unavailable")),
+        share_line,
+    ]
+    if over_limit:
+        lines.append("Creator-funder supply is above your limit.")
+    return "\n".join(lines)
+
+
+def help_text() -> str:
+    return (
+        f"{ICON_SIGNAL} <b>Help</b>\n"
+        "\n"
+        "A score uses the checks that returned data. "
+        "A line that says unavailable was not filled in with a default.\n"
+        "\n"
+        "<b>unavailable (no pool yet)</b>\n"
+        "Most pump.fun tokens never open a Raydium pool. "
+        "No pool means no price snapshot. That is expected, not a failed lookup.\n"
+        "\n"
+        "<b>unavailable (price lookup failed)</b>\n"
+        "A pool was expected and the Raydium request failed or omitted the price. "
+        "That one is worth a look in the logs.\n"
+        "\n"
+        "Previous launches count only mints stored since tracking started.\n"
+        "The creator-funder share is not added to the score. "
+        "Above your limit, the card says so on its own line.\n"
+        "\n"
+        "/settings — score floor, risk cap, creator-funder limit\n"
+        "/signals — latest signals\n"
+        "/risk mint — stored scan"
+    )
+
+
 def alert_text(
     *,
     symbol: str | None,
@@ -139,6 +214,8 @@ def alert_text(
     risk_flags: list[str],
     bait_warning: bool,
     ai_review: str | None = None,
+    context: dict[str, object] | None = None,
+    creator_over_limit: bool = False,
 ) -> str:
     flags = ", ".join(escape(flag) for flag in risk_flags) if risk_flags else "none"
     risk = "—" if risk_score is None else format_score(risk_score)
@@ -152,9 +229,21 @@ def alert_text(
     ]
     if bait_warning:
         lines.extend(["", f"<b>{BAIT_WARNING}</b>"])
+    if context is not None:
+        lines.extend(["", creator_block_text(context, over_limit=creator_over_limit)])
     lines.extend(_review_lines(ai_review))
     lines.extend(["", DISCLAIMER])
     return "\n".join(lines)
+
+
+def _distribution_line(context: dict[str, object]) -> str:
+    status = context.get("distribution_status")
+    if status == "measured" and context.get("distribution_share") is not None:
+        share = Decimal(str(context["distribution_share"]))
+        percent = (share * Decimal(100)).quantize(Decimal("1"))
+        return f"Supply on the creator's funder, scanned holders: {percent}%"
+    reason = context.get("distribution_reason") or "missing"
+    return f"Supply on the creator's funder, scanned holders: unavailable ({reason})"
 
 
 def risk_card_text(
@@ -319,6 +408,11 @@ def risk_icon(risk_score: Decimal | None) -> str:
     if danger <= RISK_ICON_MED_MAX:
         return ICON_RISK_MED
     return ICON_RISK_HIGH
+
+
+def format_share(value: Decimal) -> str:
+    percent = (value * Decimal(100)).quantize(Decimal("1"))
+    return f"{percent}%"
 
 
 def format_score(value: Decimal) -> str:

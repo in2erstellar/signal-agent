@@ -51,6 +51,10 @@ class RiskReport(BaseModel):
     # Raydium pool TVL in USD from the same lookup as the LP mint. None when
     # that response has no tvl, including pre-migration Pump.fun mints.
     liquidity_usd: Decimal | None = None
+    # no_pool: Raydium listed nothing. lookup_failed: the request failed.
+    # observed: a pool mint was returned. price_usd may still be missing.
+    pool_status: str = "lookup_failed"
+    price_usd: Decimal | None = None
 
 
 class TokenFacts(Protocol):
@@ -83,9 +87,17 @@ class RiskScanner:
         self._funder_graph = funder_graph
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._liquidity_usd: Decimal | None = None
+        self._pool_status = "lookup_failed"
+        self._price_usd: Decimal | None = None
+        self.holder_book: HolderBook | None = None
+        self.lp_book: LpBook | None = None
 
     async def scan_token(self, mint: str) -> RiskReport:
         self._liquidity_usd = None
+        self._pool_status = "lookup_failed"
+        self._price_usd = None
+        self.holder_book = None
+        self.lp_book = None
         checks = [
             await self._run("check_mint_authority", self._check_mint_authority, mint),
             await self._run("check_freeze_authority", self._check_freeze_authority, mint),
@@ -107,6 +119,8 @@ class RiskScanner:
             checks=checks,
             scanned_at=self._clock(),
             liquidity_usd=self._liquidity_usd,
+            pool_status=self._pool_status,
+            price_usd=self._price_usd,
         )
         logger.info(
             "risk_scan_finished",
@@ -125,6 +139,8 @@ class RiskScanner:
         try:
             passed, detail = await check(mint)
         except Exception as exc:
+            if name == "check_lp_lock":
+                self._pool_status = "lookup_failed"
             logger.warning(
                 "risk_check_unavailable",
                 check=name,
@@ -169,8 +185,11 @@ class RiskScanner:
 
     async def _check_lp_lock(self, mint: str) -> tuple[bool | None, str]:
         book = await self._facts.lp_book(mint)
+        self.lp_book = book
         self._liquidity_usd = book.liquidity_usd
+        self._price_usd = book.price_usd
         if book.lp_mint is None or book.supply_raw is None:
+            self._pool_status = "no_pool"
             missing = ["lp_mint"]
             if book.liquidity_usd is None:
                 missing.append("liquidity_usd")
@@ -184,6 +203,7 @@ class RiskScanner:
                 None,
                 "data incomplete: " + ", ".join(missing),
             )
+        self._pool_status = "observed"
         if book.supply_raw <= 0:
             return (
                 False,
@@ -211,6 +231,7 @@ class RiskScanner:
 
     async def _check_holder_concentration(self, mint: str) -> tuple[bool | None, str]:
         book = await self._facts.holder_book(mint)
+        self.holder_book = book
         if book.supply_raw <= 0:
             raise ValueError("mint supply is zero")
         holders = [row for row in book.rows if not row.is_lp_pool]

@@ -189,6 +189,18 @@ RISK_SCAN_GROUP = "risk_scan_workers"
 
 BAIT_POLL_INTERVAL_SECONDS = 60
 SIGNAL_FUSION_INTERVAL_SECONDS = 30
+OUTCOME_POLL_INTERVAL_SECONDS = 60
+# One sorted set. The member suffix is the horizon. listing is not queued.
+OUTCOME_QUEUE = "signalforge:outcome:pending"
+OUTCOME_HORIZONS = (
+    ("1h", 3600),
+    ("24h", 86400),
+    ("7d", 604800),
+)
+# Starting limit for the creator-funder supply flag. It does not change composite_score.
+DEFAULT_MAX_DEV_CLUSTER_SHARE = Decimal("0.25")
+DEV_CLUSTER_SHARE_STEP = Decimal("0.05")
+UNLOCK_ALERT_LEAD_HOURS = 6
 SIGNAL_RISK_SCAN_MAX_AGE_MINUTES = 5
 
 # composite = risk * 0.5 + wallet * 0.3 - bait_penalty * 0.2

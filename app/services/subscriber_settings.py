@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from app.config import DEFAULT_MAX_RISK, DEFAULT_MIN_SCORE
+from app.config import DEFAULT_MAX_DEV_CLUSTER_SHARE, DEFAULT_MAX_RISK, DEFAULT_MIN_SCORE
 
 # name -> (score floor, risk cap). Buttons on the settings screen.
 ALERT_PRESETS: dict[str, tuple[Decimal, Decimal]] = {
@@ -28,6 +28,7 @@ class AlertPrefs:
     min_score: Decimal
     max_risk: Decimal
     active: bool
+    max_dev_cluster_share: Decimal = DEFAULT_MAX_DEV_CLUSTER_SHARE
 
 
 def parse_settings(raw: dict[str, Any] | None) -> AlertPrefs:
@@ -36,6 +37,10 @@ def parse_settings(raw: dict[str, Any] | None) -> AlertPrefs:
         min_score=_decimal(data.get("min_score"), DEFAULT_MIN_SCORE),
         max_risk=_decimal(data.get("max_risk"), DEFAULT_MAX_RISK),
         active=bool(data.get("active", True)),
+        max_dev_cluster_share=_decimal(
+            data.get("max_dev_cluster_share"),
+            DEFAULT_MAX_DEV_CLUSTER_SHARE,
+        ),
     )
 
 

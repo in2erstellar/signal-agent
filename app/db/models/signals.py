@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     CheckConstraint,
@@ -18,6 +18,7 @@ from sqlalchemy import (
     false,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -54,6 +55,8 @@ class Signal(Base):
         default=False,
     )
     trace_id: Mapped[str | None] = mapped_column(String)
+    # Creator-cluster block. Separate from composite_score and risk_score.
+    context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     token: Mapped[Token] = relationship(back_populates="signals")
 

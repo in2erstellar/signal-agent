@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, DateTime, Numeric, String, Uuid, text
+from sqlalchemy import CheckConstraint, DateTime, Index, Numeric, String, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,6 +60,11 @@ class Token(Base):
     ai_review: Mapped[str | None] = mapped_column(String)
     ai_review_status: Mapped[str | None] = mapped_column(String)
     ai_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Creator-funder supply among scanned holders. Not an input to composite_score.
+    # unavailable is stored as status + reason. A missing row is not a zero share.
+    dev_distribution_status: Mapped[str | None] = mapped_column(String)
+    dev_distribution_share: Mapped[Decimal | None] = mapped_column(Numeric)
+    dev_distribution_reason: Mapped[str | None] = mapped_column(String)
 
     transactions: Mapped[list[WalletTx]] = relationship(
         back_populates="token",
@@ -99,4 +104,10 @@ class Token(Base):
             "('pending', 'completed', 'failed', 'skipped_budget_exceeded', 'truncated')",
             name="ai_review_status_values",
         ),
+        CheckConstraint(
+            "dev_distribution_status IS NULL OR dev_distribution_status IN "
+            "('measured', 'unavailable')",
+            name="dev_distribution_status_values",
+        ),
+        Index("ix_tokens_creator_address", "creator_address"),
     )

@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import structlog
@@ -22,13 +22,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import Forbidden, TelegramError
 
-from app.config import AI_REVIEW_ALERT_WAIT_SECONDS
-from app.db.models import AlertDelivery, BaitFlag, Signal, Token, User
+from app.config import AI_REVIEW_ALERT_WAIT_SECONDS, UNLOCK_ALERT_LEAD_HOURS
+from app.db.models import AlertDelivery, BaitFlag, LpUnlock, Signal, Token, User
 from app.observability import bind_trace, record_alert_sent
+from app.services.creator_cluster import share_above_limit
+from app.services.lp_unlock import unlock_alert_due
 from app.services.risk_scanner import unavailable_fields
 from app.services.subscriber_settings import accepts_alert, parse_settings, with_updates
 from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING
-from app.templates import alert_text, data_incomplete_text
+from app.templates import alert_text, data_incomplete_text, unlock_alert_text
 
 logger = structlog.get_logger(__name__)
 
@@ -43,6 +45,7 @@ class AlertSender(Protocol):
 class _Recipient:
     user_id: UUID
     telegram_id: int
+    max_dev_cluster_share: Decimal
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,7 @@ class _Snapshot:
     defer: bool
     trace_id: str | None
     recipients: list[_Recipient]
+    context: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,7 @@ class AlertDispatcher:
         self._stop = stop
 
     async def run_once(self) -> tuple[int, int, int]:
+        await self._send_unlock_alerts()
         processed = 0
         failed = 0
         sent = 0
@@ -104,6 +109,55 @@ class AlertDispatcher:
         )
         return processed, failed, sent
 
+    async def _send_unlock_alerts(self) -> None:
+        now = self._clock()
+        lead = timedelta(hours=UNLOCK_ALERT_LEAD_HOURS)
+        async with self._sessions() as session:
+            rows = list(await session.scalars(select(LpUnlock)))
+        due = [
+            row
+            for row in rows
+            if unlock_alert_due(
+                status=row.status,
+                unlock_at=row.unlock_at,
+                alerted_at=row.alerted_at,
+                now=now,
+                lead=lead,
+            )
+        ]
+        for row in due:
+            async with self._sessions() as session:
+                token = await session.get(Token, row.token_id)
+                signal = await session.scalar(select(Signal).where(Signal.token_id == row.token_id))
+                if token is None or signal is None:
+                    continue
+                user_ids = list(
+                    await session.scalars(
+                        select(AlertDelivery.user_id).where(AlertDelivery.signal_id == signal.id)
+                    )
+                )
+                users = list(
+                    await session.scalars(select(User).where(User.id.in_(user_ids)))
+                ) if user_ids else []
+            if row.unlock_at is None:
+                continue
+            text = unlock_alert_text(symbol=token.symbol, mint=token.mint, unlock_at=row.unlock_at)
+            delivered = False
+            for user in users:
+                try:
+                    await self._sender.send(user.telegram_id, text)
+                    delivered = True
+                except TelegramError:
+                    logger.warning("unlock_alert_failed", mint=token.mint)
+            if delivered:
+                async with self._sessions() as session:
+                    async with session.begin():
+                        stored = await session.get(LpUnlock, row.id)
+                        if stored is not None and stored.alerted_at is None:
+                            stored.status = "alerted"
+                            stored.alerted_at = now
+                logger.info("lp_unlock_alert_sent", mint=token.mint)
+
     async def _pending_ids(self) -> list[UUID]:
         async with self._sessions() as session:
             rows = await session.scalars(
@@ -126,25 +180,31 @@ class AlertDispatcher:
         deactivated: list[UUID] = []
         missing = unavailable_fields(snapshot.risk_flags)
         if missing:
-            text = data_incomplete_text(mint=snapshot.mint, missing=missing)
             logger.warning(
                 "alert_data_incomplete",
                 mint=snapshot.mint,
                 missing=missing,
                 reason="scan_fields_unavailable",
             )
-        else:
-            text = alert_text(
-                symbol=snapshot.symbol,
-                mint=snapshot.mint,
-                composite_score=snapshot.composite_score,
-                risk_score=snapshot.risk_score,
-                risk_flags=snapshot.risk_flags,
-                bait_warning=snapshot.bait_warning,
-                ai_review=snapshot.ai_review,
-            )
         with bind_trace(snapshot.trace_id):
             for recipient in snapshot.recipients:
+                if missing:
+                    text = data_incomplete_text(mint=snapshot.mint, missing=missing)
+                else:
+                    text = alert_text(
+                        symbol=snapshot.symbol,
+                        mint=snapshot.mint,
+                        composite_score=snapshot.composite_score,
+                        risk_score=snapshot.risk_score,
+                        risk_flags=snapshot.risk_flags,
+                        bait_warning=snapshot.bait_warning,
+                        ai_review=snapshot.ai_review,
+                        context=snapshot.context,
+                        creator_over_limit=share_above_limit(
+                            snapshot.context,
+                            recipient.max_dev_cluster_share,
+                        ),
+                    )
                 try:
                     await self._sender.send(recipient.telegram_id, text)
                 except Forbidden:
@@ -208,7 +268,9 @@ class AlertDispatcher:
                     risk_score=signal.risk_score,
                 ):
                     continue
-                recipients.append(_Recipient(user.id, user.telegram_id))
+                recipients.append(
+                    _Recipient(user.id, user.telegram_id, prefs.max_dev_cluster_share)
+                )
             flags = token.risk_flags if isinstance(token.risk_flags, list) else []
             review = _completed_review(token)
             waiting = (
@@ -229,6 +291,7 @@ class AlertDispatcher:
                 defer=waiting,
                 trace_id=signal.trace_id,
                 recipients=recipients,
+                context=signal.context if isinstance(signal.context, dict) else None,
             )
 
     async def _persist(

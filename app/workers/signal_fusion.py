@@ -39,6 +39,7 @@ from app.config import (
 from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace
 from app.services.ai_budget import release_review, reserve_review, review_counts, tokens_used
+from app.services.creator_cluster import load_creator_context
 from app.services.risk_scanner import unavailable_fields
 from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING, AI_REVIEW_TRUNCATED
 
@@ -240,6 +241,7 @@ class SignalFusion:
                     threshold=str(SIGNAL_THRESHOLD),
                 )
             return False
+        context = await load_creator_context(session, token)
         inserted_id = await session.scalar(
             pg_insert(Signal)
             .values(
@@ -250,6 +252,7 @@ class SignalFusion:
                 triggered_at=now,
                 notified=False,
                 trace_id=token.trace_id,
+                context=context,
             )
             .on_conflict_do_nothing(constraint="uq_signals_token_id")
             .returning(Signal.id)

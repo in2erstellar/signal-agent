@@ -20,10 +20,12 @@ from app.config import (
     BAIT_POLL_INTERVAL_SECONDS,
     DISCOVERY_REVIEW_INTERVAL_SECONDS,
     FUNDER_GRAPH_CONCURRENCY,
+    OUTCOME_POLL_INTERVAL_SECONDS,
     SIGNAL_FUSION_INTERVAL_SECONDS,
     get_settings,
 )
 from app.db.base import create_engine, create_sessionmaker
+from app.services.outcome_jobs import OutcomeWorker
 from app.workers.alert_dispatcher import AlertDispatcher
 from app.workers.bait_check_worker import BaitCheckWorker, detector_for_session
 from app.workers.risk_scan_worker import PrebuiltClusters, RiskScanWorker
@@ -187,6 +189,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     reviews = AiReviewClient.from_settings(settings)
     risk = RiskScanWorker(sessions, redis, funder_factory, scanner_factory, stop=stop)
     bait = BaitCheckWorker(sessions, redis, detector_factory, stop=stop)
+    outcomes = OutcomeWorker(sessions, redis, raydium, lp_books=facts, stop=stop)
     fusion = SignalFusion(
         sessions,
         redis,
@@ -265,6 +268,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             discovery_loop,
             lambda: poll_loop(stop, review_once, DISCOVERY_REVIEW_INTERVAL_SECONDS),
             lambda: poll_loop(stop, bait.run_once, BAIT_POLL_INTERVAL_SECONDS),
+            lambda: poll_loop(stop, outcomes.run_once, OUTCOME_POLL_INTERVAL_SECONDS),
             lambda: poll_loop(stop, fusion.run_once, SIGNAL_FUSION_INTERVAL_SECONDS),
             ai_review_loop,
             alerts_loop,

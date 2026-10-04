@@ -7,6 +7,7 @@ https://docs.raydium.io/reference/program-addresses points at
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -17,6 +18,15 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 
 class RaydiumError(Exception):
     """The Raydium HTTP API did not return a usable pool list."""
+
+
+@dataclass(frozen=True)
+class PoolQuote:
+    """One pool response. A null LP mint means the API listed no pool."""
+
+    lp_mint: str | None
+    tvl_usd: Decimal | None
+    price_usd: Decimal | None
 
 
 class RaydiumPools:
@@ -41,8 +51,12 @@ class RaydiumPools:
         lp_mint, _tvl = await self.top_pool(mint)
         return lp_mint
 
-    async def top_pool(self, mint: str) -> tuple[str | None, Decimal | None]:
-        """LP mint and USD TVL of the top pool, from the same response."""
+    async def pool_quote(self, mint: str) -> PoolQuote:
+        """LP mint, USD TVL, and USD price from one ``pools/info/mint`` response.
+
+        An empty pool list is a quote with nulls, not an error. HTTP failures
+        and error payloads raise ``RaydiumError``.
+        """
         response = await self._client.get(
             f"{self._base_url}/pools/info/mint",
             params={
@@ -59,8 +73,17 @@ class RaydiumPools:
             raise RaydiumError(f"Raydium pool lookup failed with HTTP {response.status_code}")
         pool = _first_pool(response.json())
         if pool is None:
-            return None, None
-        return _lp_address(pool), _tvl_usd(pool)
+            return PoolQuote(lp_mint=None, tvl_usd=None, price_usd=None)
+        return PoolQuote(
+            lp_mint=_lp_address(pool),
+            tvl_usd=_tvl_usd(pool),
+            price_usd=_price_usd(pool),
+        )
+
+    async def top_pool(self, mint: str) -> tuple[str | None, Decimal | None]:
+        """LP mint and USD TVL of the top pool, from the same response."""
+        quote = await self.pool_quote(mint)
+        return quote.lp_mint, quote.tvl_usd
 
 
 def _lp_mint(payload: Any) -> str | None:
@@ -97,10 +120,20 @@ def _lp_address(pool: dict[str, Any]) -> str:
 
 
 def _tvl_usd(pool: dict[str, Any]) -> Decimal | None:
-    raw = pool.get("tvl")
+    return _positive_decimal(pool.get("tvl"))
+
+
+def _price_usd(pool: dict[str, Any]) -> Decimal | None:
+    return _positive_decimal(pool.get("price"))
+
+
+def _positive_decimal(raw: object) -> Decimal | None:
     if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
         return None
     try:
-        return Decimal(str(raw))
+        value = Decimal(str(raw))
     except Exception:
         return None
+    if value <= 0:
+        return None
+    return value
