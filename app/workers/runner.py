@@ -106,11 +106,17 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     from app.adapters.token_security import HeliusTokenSecurity
     from app.services.funder_graph import FunderGraphBuilder
     from app.services.risk_scanner import RiskScanner
+    from app.services.startup_checks import assert_worker_ready
     from app.workers.ai_review_worker import AiReviewWorker
     from app.workers.token_discovery import TokenDiscovery
 
     settings = get_settings()
     engine = create_engine(settings)
+    try:
+        await assert_worker_ready(engine, settings.helius_api_key.get_secret_value())
+    except Exception:
+        await engine.dispose()
+        raise
     sessions = create_sessionmaker(engine)
     # XREADGROUP blocks for 5s. The socket timeout has to be longer than that
     # block, or the first read raises and the consumer task dies.
