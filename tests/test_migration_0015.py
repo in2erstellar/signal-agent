@@ -114,6 +114,15 @@ async def _columns(url: str, table: str) -> set[str]:
     return names
 
 
+def test_readme_rollback_stops_the_worker_before_downgrade() -> None:
+    readme = (ROOT / "README.md").read_text()
+    rollback = readme.split("## Откат ревизии 0015", 1)[1]
+    stop = rollback.index("stop worker")
+    delete = rollback.index("DEL signalforge:outcome:pending")
+    downgrade = rollback.index("alembic downgrade 0014_funder_cache_signature")
+    assert stop < delete < downgrade
+
+
 async def test_upgrade_downgrade_upgrade_keeps_existing_rows(migrated_url: str) -> None:
     _alembic(migrated_url, "upgrade", PRIOR)
     engine = create_async_engine(migrated_url)

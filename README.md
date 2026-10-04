@@ -63,6 +63,8 @@ uv run alembic upgrade head
 
 Образ Postgres: `timescale/timescaledb:2.30.1-pg16-oss`.
 
+Откат ревизии `0015` — в разделе «Откат ревизии 0015» ниже. Сначала останавливается worker, потом удаляется ключ Redis, и только затем `alembic downgrade`.
+
 ## Как создать Helius webhook вручную перед первым запуском
 
 Бот webhook не создаёт. Один раз его заводит человек в кабинете, дальше `/watch` только дописывает адрес в `accountAddresses` через `PUT /v0/webhooks/{id}`.
@@ -96,6 +98,24 @@ docker compose -f docker-compose.prod.yml exec api alembic upgrade head
 ```
 
 Проверка: `curl localhost:8000/health` и `curl localhost:8000/metrics`.
+
+## Откат ревизии 0015
+
+Снимки `+1h`, `+24h` и `+7d` лежат в Redis-ключе `signalforge:outcome:pending`. Его пишет и читает процесс `worker` (`python -m app.workers.runner`), не миграция. Пока worker запущен, созревший горизонт он записывает в `outcome_checks`.
+
+`alembic downgrade` эту таблицу удаляет и ключ не трогает. Если worker в этот момент ещё работает, запись результата падает: таблицы уже нет, член остаётся в наборе и крутится на каждом опросе. Уже снятые цены при откате схемы тоже уходят вместе с таблицей.
+
+Порядок такой. Не менять его местами.
+
+```bash
+docker compose -f docker-compose.prod.yml stop worker
+docker compose -f docker-compose.prod.yml exec redis redis-cli DEL signalforge:outcome:pending
+docker compose -f docker-compose.prod.yml exec api alembic downgrade 0014_funder_cache_signature
+```
+
+Локально то же самое: `docker compose stop worker`, затем `docker compose exec redis redis-cli DEL signalforge:outcome:pending`, затем `uv run alembic downgrade 0014_funder_cache_signature`.
+
+После этого не поднимать текущий worker на откатанной схеме. Сначала образ без этой ревизии, потом `docker compose -f docker-compose.prod.yml start worker`.
 
 Перед первым запуском на живых пользователях нужен платный ключ Helius (`funded-by` на бесплатном плане отвечает 403), секрет webhook, токен бота из BotFather и `PUBLIC_API_KEY`, отличный от `replace-me`.
 
