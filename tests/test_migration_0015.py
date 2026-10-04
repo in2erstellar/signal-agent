@@ -121,6 +121,9 @@ def test_readme_rollback_stops_the_worker_before_downgrade() -> None:
     delete = rollback.index("DEL signalforge:outcome:pending")
     downgrade = rollback.index("alembic downgrade 0014_funder_cache_signature")
     assert stop < delete < downgrade
+    assert "пока голова — `0015`" in rollback
+    assert "эту команду не копировать" in rollback
+    assert "печатает `0`" in rollback
 
 
 async def test_upgrade_downgrade_upgrade_keeps_existing_rows(migrated_url: str) -> None:
