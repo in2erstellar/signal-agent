@@ -102,7 +102,7 @@ async def test_dispatcher_sends_only_to_users_inside_both_filters(sessions: obje
     assert (processed, failed, sent) == (1, 0, 1)
     assert [chat for chat, _ in sender.sent] == [101]
     text = sender.sent[0][1]
-    assert "<b>72.5</b>" in text
+    assert "<b><code>72.5</code></b>" in text
     assert f"https://solscan.io/token/{MINT}" in text
     assert "check_funder_cluster_exposure" in text
     assert BAIT_WARNING in text
