@@ -118,6 +118,18 @@ async def test_webhook_risk_scan_signal_and_bait_check(pipeline_infra: object) -
         processed, failed = await risk.run_once()
         assert (processed, failed) == (1, 0)
 
+        async with sessions() as session:
+            async with session.begin():
+                scanned = await session.scalar(select(Token).where(Token.mint == MINT))
+                assert scanned is not None
+                # The webhook fixture has no creator, so the scan stores
+                # creator_missing. This test follows a completed scan through
+                # to a signal; the degraded gate is covered on its own.
+                scanned.creator_address = "Creator111111111111111111111111111111111"
+                scanned.dev_distribution_status = "measured"
+                scanned.dev_distribution_share = Decimal("0.1")
+                scanned.dev_distribution_reason = None
+
         fusion = SignalFusion(sessions, clock=clock)
         seen, fusion_failed, created = await fusion.run_once()
         assert (seen, fusion_failed, created) == (1, 0, 1)

@@ -172,6 +172,7 @@ async def test_tpd_429_marks_skipped_budget_exceeded(pipeline_infra: object) -> 
                         mint="mint-review",
                         risk_score=Decimal("80"),
                         liquidity_usd=Decimal("12000"),
+                        creator_address="creator-known",
                         updated_at=NOW,
                     )
                 )

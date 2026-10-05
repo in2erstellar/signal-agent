@@ -52,6 +52,7 @@ async def test_length_finish_is_truncated_and_omitted_from_the_card(
                         symbol="ELIZABETH",
                         risk_score=Decimal("80"),
                         liquidity_usd=Decimal("12000"),
+                        creator_address="creator-known",
                         updated_at=NOW,
                         risk_flags=["check_lp_lock"],
                     )

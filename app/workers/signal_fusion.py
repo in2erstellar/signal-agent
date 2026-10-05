@@ -43,6 +43,18 @@ from app.services.creator_cluster import load_creator_context
 from app.services.risk_scanner import unavailable_fields
 from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING, AI_REVIEW_TRUNCATED
 
+# A creator-cluster read that could have resolved and did not. Young-database
+# history, the median-sell ledger limit, ``distribution_not_run``, and
+# ``no_holder_balances`` are not in this set.
+CREATOR_CLUSTER_DEGRADED_REASONS = frozenset(
+    {
+        "holder_funder_missing",
+        "creator_funder_missing",
+        "creator_missing",
+        "holder_book_missing",
+    }
+)
+
 logger = structlog.get_logger(__name__)
 
 Clock = Callable[[], datetime]
@@ -79,6 +91,20 @@ def wallet_score_from_win_rates(win_rates: list[Decimal | None]) -> Decimal:
 
 def wallet_history_known(win_rates: list[Decimal | None]) -> bool:
     return any(rate is not None for rate in win_rates)
+
+
+def creator_cluster_degraded_reason(context: dict[str, Any] | None) -> str | None:
+    """Return a distribution reason that blocks a signal, or None.
+
+    Only the distribution line is read. Price-drop history, LP history, and
+    the constant median-sell line never block here.
+    """
+    if not context or context.get("distribution_status") != "unavailable":
+        return None
+    reason = context.get("distribution_reason")
+    if reason in CREATOR_CLUSTER_DEGRADED_REASONS:
+        return str(reason)
+    return None
 
 
 class AiReviewCandidate(Protocol):
@@ -133,9 +159,7 @@ def qualifies_for_ai_review(
 def composite_without_wallet(risk_score: Decimal, bait_flag_penalty: Decimal) -> Decimal:
     """Risk and bait only, scaled so a perfect scan with no penalty is 100."""
     weight = SIGNAL_RISK_WEIGHT + SIGNAL_BAIT_WEIGHT
-    raw = (
-        risk_score * SIGNAL_RISK_WEIGHT - bait_flag_penalty * SIGNAL_BAIT_WEIGHT
-    ) / weight
+    raw = (risk_score * SIGNAL_RISK_WEIGHT - bait_flag_penalty * SIGNAL_BAIT_WEIGHT) / weight
     return raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
@@ -242,6 +266,16 @@ class SignalFusion:
                 )
             return False
         context = await load_creator_context(session, token)
+        degraded = creator_cluster_degraded_reason(context)
+        if degraded:
+            with bind_trace(token.trace_id):
+                logger.warning(
+                    "creator_cluster_data_quality",
+                    mint=token.mint,
+                    flag="creator_cluster_data_quality:degraded",
+                    reason=f"degraded: {degraded}",
+                )
+            return False
         inserted_id = await session.scalar(
             pg_insert(Signal)
             .values(

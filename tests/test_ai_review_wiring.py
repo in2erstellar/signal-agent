@@ -95,18 +95,21 @@ async def test_only_a_qualifying_signal_is_enqueued(pipeline_infra: object) -> N
                             mint="mint-review",
                             risk_score=Decimal("80"),
                             liquidity_usd=Decimal("12000"),
+                            creator_address="creator-known",
                             updated_at=NOW,
                         ),
                         make_token(
                             mint="mint-thin",
                             risk_score=Decimal("80"),
                             liquidity_usd=Decimal("1000"),
+                            creator_address="creator-known",
                             updated_at=NOW,
                         ),
                         make_token(
                             mint="mint-high",
                             risk_score=Decimal("100"),
                             liquidity_usd=Decimal("12000"),
+                            creator_address="creator-known",
                             updated_at=NOW,
                         ),
                     ]
@@ -127,8 +130,12 @@ async def test_only_a_qualifying_signal_is_enqueued(pipeline_infra: object) -> N
             assert review is not None and review.ai_review_status == AI_REVIEW_PENDING
             assert thin is not None and thin.ai_review_status is None
             assert high is not None and high.ai_review_status is None
-            assert await session.scalar(select(Signal).where(Signal.token_id == thin.id)) is not None
-            assert await session.scalar(select(Signal).where(Signal.token_id == high.id)) is not None
+            assert (
+                await session.scalar(select(Signal).where(Signal.token_id == thin.id)) is not None
+            )
+            assert (
+                await session.scalar(select(Signal).where(Signal.token_id == high.id)) is not None
+            )
 
         await redis.set(day_key(NOW), AI_REVIEW_DAILY_BUDGET)
         async with sessions() as session:
@@ -138,6 +145,7 @@ async def test_only_a_qualifying_signal_is_enqueued(pipeline_infra: object) -> N
                         mint="mint-capped",
                         risk_score=Decimal("80"),
                         liquidity_usd=Decimal("12000"),
+                        creator_address="creator-known",
                         updated_at=NOW,
                     )
                 )
@@ -168,6 +176,7 @@ async def test_worker_stores_the_review_and_refunds_a_permanent_failure(
                         symbol="ELIZABETH",
                         risk_score=Decimal("80"),
                         liquidity_usd=Decimal("12000"),
+                        creator_address="creator-known",
                         updated_at=NOW,
                         risk_flags=["check_lp_lock"],
                     )
@@ -196,6 +205,7 @@ async def test_worker_stores_the_review_and_refunds_a_permanent_failure(
                         mint="mint-bad",
                         risk_score=Decimal("80"),
                         liquidity_usd=Decimal("12000"),
+                        creator_address="creator-known",
                         updated_at=NOW + timedelta(seconds=1),
                     )
                 )
@@ -203,7 +213,9 @@ async def test_worker_stores_the_review_and_refunds_a_permanent_failure(
         fusion_later = SignalFusion(sessions, redis, reviews_enabled=True, clock=lambda: later)
         await fusion_later.run_once()
         assert (await review_counts(redis, later))[1] == 2
-        bad = AiReviewWorker(sessions, redis, _Permanent(), clock=lambda: later, consumer_name="ai-bad")
+        bad = AiReviewWorker(
+            sessions, redis, _Permanent(), clock=lambda: later, consumer_name="ai-bad"
+        )
         processed, failed = await bad.run_once()
         assert (processed, failed) == (1, 0)
         async with sessions() as session:
