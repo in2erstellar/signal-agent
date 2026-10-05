@@ -51,10 +51,15 @@ ScannerFactory = Callable[[AsyncSession, list[FunderCluster]], RiskScanner]
 
 
 class PrebuiltClusters:
-    """FunderClusters port over a graph that was just built."""
+    """FunderClusters port over a graph that was just built.
 
-    def __init__(self, clusters: list[FunderCluster]) -> None:
+    ``built`` is false when the worker skipped the walk. An empty list then
+    means the graph does not exist, not that no cluster was found.
+    """
+
+    def __init__(self, clusters: list[FunderCluster], *, built: bool = True) -> None:
         self._clusters = clusters
+        self.built = built
 
     async def build_graph_for_token(
         self,
@@ -62,6 +67,13 @@ class PrebuiltClusters:
         top_n_holders: int = 20,
     ) -> list[FunderCluster]:
         return list(self._clusters)
+
+
+def mark_funder_graph_unbuilt(scanner: object) -> None:
+    """Tell the scanner this scan has no funder graph to read."""
+    funder = getattr(scanner, "_funder_graph", None)
+    if isinstance(funder, PrebuiltClusters):
+        funder.built = False
 
 
 class RiskScanWorker:
@@ -195,6 +207,8 @@ class RiskScanWorker:
                     elif token is not None and prior is None:
                         token.funder_graph_status = FUNDER_GRAPH_BUILT
                 scanner = self._scanner_factory(session, list(clusters))
+                if prior == FUNDER_GRAPH_SKIPPED:
+                    mark_funder_graph_unbuilt(scanner)
                 report = await scanner.scan_token(mint)
                 if token is None:
                     token = Token(mint=mint, first_seen_at=report.scanned_at)

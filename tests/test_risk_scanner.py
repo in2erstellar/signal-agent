@@ -17,7 +17,14 @@ from app.config import (
     RISK_CHECK_WEIGHTS,
 )
 from app.db.models import FunderCluster
-from app.services.risk_scanner import CheckResult, RiskReport, RiskScanner, composite_risk_score
+from app.services.risk_scanner import (
+    CheckResult,
+    RiskReport,
+    RiskScanner,
+    composite_risk_score,
+    unavailable_fields,
+)
+from app.workers.risk_scan_worker import PrebuiltClusters, _risk_flags, mark_funder_graph_unbuilt
 
 MINT = "TokenMint111111111111111111111111111111111"
 AUTHORITY = "Auth1111111111111111111111111111111111111"
@@ -363,6 +370,53 @@ async def test_helius_error_on_funder_graph_does_not_abort_the_scan() -> None:
     assert funder.detail == "check_funder_cluster_exposure: unavailable (HeliusError)"
     assert report.risk_score == 0
     assert composite_risk_score(report.checks) == 0
+
+
+async def test_unbuilt_funder_graph_is_unavailable_and_an_empty_built_graph_passes() -> None:
+    facts = FakeFacts(
+        mint_view=MintView(None, None, 1_000),
+        holder_book=HolderBook(1_000, [HolderRow("h", 100, is_lp_pool=False)]),
+        lp_book=LpBook(
+            LP_MINT,
+            1_000,
+            [LpHolderRow(BURN, 1_000, is_burn_address=True, is_lock_program=False)],
+        ),
+    )
+    unbuilt = PrebuiltClusters([], built=False)
+    scanner, _, _ = _scanner(facts, unbuilt)
+    report = await scanner.scan_token(MINT)
+    funder = next(check for check in report.checks if check.name == "check_funder_cluster_exposure")
+    assert funder.passed is None
+    assert "not built" in funder.detail
+    flags = _risk_flags(report)
+    assert "check_funder_cluster_exposure:unavailable" in flags
+    assert unavailable_fields(flags) == ["check_funder_cluster_exposure"]
+    assert report.risk_score == (
+        RISK_CHECK_WEIGHTS["check_mint_authority"]
+        + RISK_CHECK_WEIGHTS["check_freeze_authority"]
+        + RISK_CHECK_WEIGHTS["check_lp_lock"]
+        + RISK_CHECK_WEIGHTS["check_holder_concentration"]
+    )
+
+    built = PrebuiltClusters([])
+    scanner_built, _, _ = _scanner(facts, built)
+    built_report = await scanner_built.scan_token(MINT)
+    built_funder = next(
+        check for check in built_report.checks if check.name == "check_funder_cluster_exposure"
+    )
+    assert built.built is True
+    assert built_funder.passed is True
+    assert built_report.risk_score == report.risk_score + RISK_CHECK_WEIGHTS["check_funder_cluster_exposure"]
+
+
+def test_skipped_scan_marks_the_prebuilt_graph_unbuilt() -> None:
+    class _Scanner:
+        def __init__(self) -> None:
+            self._funder_graph = PrebuiltClusters([])
+
+    scanner = _Scanner()
+    mark_funder_graph_unbuilt(scanner)
+    assert scanner._funder_graph.built is False
 
 
 def test_composite_score_ignores_failed_and_unavailable() -> None:

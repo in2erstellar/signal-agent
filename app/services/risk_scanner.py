@@ -253,6 +253,14 @@ class RiskScanner:
         )
 
     async def _check_funder_cluster_exposure(self, mint: str) -> tuple[bool | None, str]:
+        # A skipped pre-migration walk leaves an empty list. That is not the
+        # same result as a built graph with no cluster above the threshold.
+        if getattr(self._funder_graph, "built", True) is False:
+            return (
+                None,
+                "Funder graph was not built. An empty cluster list is not "
+                "evidence that holders were funded independently.",
+            )
         clusters = await self._funder_graph.build_graph_for_token(mint)
         flagged = [
             cluster
