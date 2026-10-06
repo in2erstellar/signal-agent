@@ -11,6 +11,8 @@ from app.config import (
     RISK_HEAVY_GROUP,
     RISK_HEAVY_QUEUE,
     RISK_SCAN_GROUP,
+    RISK_SCAN_PRIORITY_GROUP,
+    RISK_SCAN_PRIORITY_QUEUE,
     RISK_SCAN_QUEUE,
 )
 from app.services.bait_detector import PendingBaitCheck
@@ -22,6 +24,8 @@ __all__ = [
     "RISK_HEAVY_GROUP",
     "RISK_HEAVY_QUEUE",
     "RISK_SCAN_GROUP",
+    "RISK_SCAN_PRIORITY_GROUP",
+    "RISK_SCAN_PRIORITY_QUEUE",
     "RISK_SCAN_QUEUE",
     "bait_member",
     "parse_bait_member",

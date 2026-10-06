@@ -184,10 +184,13 @@ if BAIT_RECHECK_DELAY_MINUTES < BAIT_SELL_WINDOW_END_MINUTES:
 # Redis names for the pipeline. Bait jobs are delayed, so they live in a
 # sorted set scored by scheduled_at. Risk scans are immediate, so they use a stream.
 RISK_SCAN_QUEUE = "risk_scan_queue"
+# Migrations only. The fast consumer reads this before RISK_SCAN_QUEUE.
+RISK_SCAN_PRIORITY_QUEUE = "risk_scan_priority_queue"
 # Holder concentration and the funder walk. Acked separately from RISK_SCAN_QUEUE.
 RISK_HEAVY_QUEUE = "risk_heavy_queue"
 BAIT_CHECK_QUEUE = "bait_check_queue"
 RISK_SCAN_GROUP = "risk_scan_workers"
+RISK_SCAN_PRIORITY_GROUP = "risk_scan_priority_workers"
 RISK_HEAVY_GROUP = "risk_heavy_workers"
 
 BAIT_POLL_INTERVAL_SECONDS = 60
@@ -279,6 +282,10 @@ AI_REVIEW_SCORE_MAX = Decimal("85")
 
 # One process may walk at most this many funder graphs at once.
 FUNDER_GRAPH_CONCURRENCY = 3
+# Fast scans (mint, freeze, LP) do not share those slots. Most of them never
+# call getTokenLargestAccounts. The Helius client still has one send lock and
+# one 429 pause, so this does not add a second in-flight HTTP request.
+FAST_SCAN_CONCURRENCY = 8
 # Same wallet and the same transient funded-by error. A 403 does not use this
 # counter: the free plan forbids that call, so the lookup is permanent at once.
 MAX_FUNDER_LOOKUP_RETRIES = 2
@@ -329,6 +336,8 @@ if AI_REVIEW_STALE_HOURS <= 0 or AI_REVIEW_ALERT_WAIT_SECONDS < 0:
     raise RuntimeError("AI review staleness and alert wait must be non-negative")
 if FUNDER_GRAPH_CONCURRENCY < 1:
     raise RuntimeError("FUNDER_GRAPH_CONCURRENCY must be at least 1")
+if FAST_SCAN_CONCURRENCY < 1:
+    raise RuntimeError("FAST_SCAN_CONCURRENCY must be at least 1")
 if MAX_FUNDER_LOOKUP_RETRIES < 1:
     raise RuntimeError("MAX_FUNDER_LOOKUP_RETRIES must be at least 1")
 if FUNDER_LOOKUP_METHOD not in {"rpc", "helius_funded_by"}:

@@ -19,6 +19,7 @@ from app.config import (
     ALERT_DISPATCH_INTERVAL_SECONDS,
     BAIT_POLL_INTERVAL_SECONDS,
     DISCOVERY_REVIEW_INTERVAL_SECONDS,
+    FAST_SCAN_CONCURRENCY,
     FUNDER_GRAPH_CONCURRENCY,
     OUTCOME_POLL_INTERVAL_SECONDS,
     SIGNAL_FUSION_INTERVAL_SECONDS,
@@ -131,6 +132,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     raydium = RaydiumPools(settings.raydium_api_base_url)
     facts = HeliusTokenSecurity(helius, raydium, PumpSwapPools(helius))
     stop = stop or asyncio.Event()
+    fast_slots = asyncio.Semaphore(FAST_SCAN_CONCURRENCY)
     graph_slots = asyncio.Semaphore(FUNDER_GRAPH_CONCURRENCY)
 
     async def notify_discovery_down(text: str = DISCOVERY_DOWN_MESSAGE) -> None:
@@ -202,8 +204,11 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         funder_factory,
         scanner_factory,
         stop=stop,
-        scan_slots=graph_slots,
+        fast_slots=fast_slots,
+        heavy_slots=graph_slots,
     )
+    moved = await risk.move_undelivered_post_migrations()
+    logger.info("risk_scan_priority_backlog_moved", moved=moved)
     bait = BaitCheckWorker(sessions, redis, detector_factory, stop=stop)
     outcomes = OutcomeWorker(sessions, redis, raydium, lp_custody=facts, stop=stop)
     fusion = SignalFusion(

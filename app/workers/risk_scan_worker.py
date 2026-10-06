@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from redis.asyncio import Redis
@@ -27,6 +27,8 @@ from app.config import (
     RISK_HEAVY_GROUP,
     RISK_HEAVY_QUEUE,
     RISK_SCAN_GROUP,
+    RISK_SCAN_PRIORITY_GROUP,
+    RISK_SCAN_PRIORITY_QUEUE,
     RISK_SCAN_QUEUE,
 )
 from app.db.models import FunderCluster, Token
@@ -110,7 +112,8 @@ class RiskScanWorker:
         stop: Any | None = None,
         consumer_name: str = "risk-scan",
         retry_backoff_seconds: float = 2.0,
-        scan_slots: asyncio.Semaphore | None = None,
+        fast_slots: asyncio.Semaphore | None = None,
+        heavy_slots: asyncio.Semaphore | None = None,
     ) -> None:
         self._sessions = sessions
         self._redis = redis
@@ -120,20 +123,52 @@ class RiskScanWorker:
         self._consumer = consumer_name
         self._group_ready = False
         self._retry_backoff_seconds = retry_backoff_seconds
-        # Shared by the fast ack and the heavy walk. Not acquired again inside
-        # the funder-graph builder: asyncio.Semaphore is not reentrant.
-        self._scan_slots = scan_slots
+        # Independent of heavy_slots. The funder-graph builder must not acquire
+        # either one: asyncio.Semaphore is not reentrant.
+        self._fast_slots = fast_slots
+        self._heavy_slots = heavy_slots
         self._heavy_group_ready = False
+        self._priority_group_ready = False
 
     async def run_once(self, *, block_ms: int | None = None) -> tuple[int, int]:
-        return await self._run_queue(
+        """One priority read, then the qualify stream.
+
+        A non-empty priority batch does not skip qualify. The numbered plan
+        said to read the background stream only when priority was empty. That
+        would let one unacked priority message hide qualify on every later
+        pass. The same plan forbids that, so qualify is read after the single
+        priority pass. The 5s block is used only when priority returned nothing.
+        """
+        priority = await self._read_available(
+            RISK_SCAN_PRIORITY_QUEUE,
+            RISK_SCAN_PRIORITY_GROUP,
+            self._ensure_priority_group,
+            block_ms=None,
+        )
+        priority_processed, priority_failed = await self._dispatch(
+            RISK_SCAN_PRIORITY_QUEUE,
+            RISK_SCAN_PRIORITY_GROUP,
+            priority,
+            self._fast_slots,
+            self._handle_message_body,
+        )
+        background = await self._read_available(
             RISK_SCAN_QUEUE,
             RISK_SCAN_GROUP,
             self._ensure_group,
-            self._handle_message_body,
-            block_ms=block_ms,
-            cycle_event="risk_scan_cycle",
+            block_ms=None if priority else block_ms,
         )
+        processed, failed = await self._dispatch(
+            RISK_SCAN_QUEUE,
+            RISK_SCAN_GROUP,
+            background,
+            self._fast_slots,
+            self._handle_message_body,
+        )
+        processed += priority_processed
+        failed += priority_failed
+        logger.info("risk_scan_cycle", processed=processed, failed=failed)
+        return processed, failed
 
     async def run_heavy_once(self, *, block_ms: int | None = None) -> tuple[int, int]:
         return await self._run_queue(
@@ -141,64 +176,136 @@ class RiskScanWorker:
             RISK_HEAVY_GROUP,
             self._ensure_heavy_group,
             self._handle_heavy_body,
+            slots=self._heavy_slots,
             block_ms=block_ms,
             cycle_event="risk_heavy_cycle",
         )
+
+    async def move_undelivered_post_migrations(self) -> int:
+        """Copy not-yet-delivered post_migration entries onto the priority stream.
+
+        PEL entries stay where the consumer already claimed them. A second call
+        finds nothing to copy: the first call deleted those stream ids.
+        """
+        await self._ensure_group()
+        await self._ensure_priority_group()
+        last_id = "0-0"
+        for group in await self._redis.xinfo_groups(RISK_SCAN_QUEUE):
+            if str(group.get("name")) == RISK_SCAN_GROUP:
+                last_id = str(group.get("last-delivered-id") or "0-0")
+                break
+        moved = 0
+        start = f"({last_id}"
+        while True:
+            rows = await self._redis.xrange(RISK_SCAN_QUEUE, min=start, max="+", count=100)
+            if not rows:
+                break
+            for raw_id, raw_fields in rows:
+                if raw_id is None or raw_fields is None:
+                    continue
+                message_id = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
+                start = "(" + message_id
+                payload: dict[str, str] = {}
+                for key, value in raw_fields.items():
+                    field = key.decode() if isinstance(key, bytes) else str(key)
+                    payload[field] = value.decode() if isinstance(value, bytes) else str(value)
+                if payload.get("reason") != "post_migration":
+                    continue
+                await self._redis.xadd(RISK_SCAN_PRIORITY_QUEUE, cast(Any, payload))
+                await self._redis.xdel(RISK_SCAN_QUEUE, message_id)
+                moved += 1
+            if len(rows) < 100:
+                break
+        return moved
 
     async def _run_queue(
         self,
         queue: str,
         group: str,
         ensure: Callable[[], Any],
-        handle: Callable[[str, dict[str, str]], Any],
+        handle: Callable[..., Any],
         *,
+        slots: asyncio.Semaphore | None,
         block_ms: int | None,
         cycle_event: str,
     ) -> tuple[int, int]:
+        messages = await self._read_available(queue, group, ensure, block_ms=block_ms)
+        processed, failed = await self._dispatch(queue, group, messages, slots, handle)
+        logger.info(cycle_event, processed=processed, failed=failed)
+        return processed, failed
+
+    async def _read_available(
+        self,
+        queue: str,
+        group: str,
+        ensure: Callable[[], Any],
+        *,
+        block_ms: int | None,
+    ) -> list[tuple[str, dict[str, str]]]:
+        """This consumer's PEL, then new messages. PEL is not read again."""
         await ensure()
         messages = await self._read(queue, group, "0", block_ms=None)
         messages.extend(await self._read(queue, group, ">", block_ms=block_ms))
-        if self._scan_slots is None:
+        return messages
+
+    async def _dispatch(
+        self,
+        queue: str,
+        group: str,
+        messages: list[tuple[str, dict[str, str]]],
+        slots: asyncio.Semaphore | None,
+        handle: Callable[..., Any],
+    ) -> tuple[int, int]:
+        async def call(message_id: str, fields: dict[str, str]) -> tuple[int, int]:
+            outcome: tuple[int, int] = await handle(message_id, fields, queue=queue, group=group)
+            return outcome
+
+        if slots is None:
             outcomes: list[tuple[int, int]] = []
             for message_id, fields in messages:
                 if self._stopping():
                     break
-                outcomes.append(await handle(message_id, fields))
+                outcomes.append(await call(message_id, fields))
         else:
             tasks = [
-                asyncio.create_task(self._in_slot(handle, message_id, fields))
+                asyncio.create_task(self._in_slot(slots, call, message_id, fields))
                 for message_id, fields in messages
                 if not self._stopping()
             ]
             outcomes = list(await asyncio.gather(*tasks))
-        processed = sum(item[0] for item in outcomes)
-        failed = sum(item[1] for item in outcomes)
-        logger.info(cycle_event, processed=processed, failed=failed)
-        return processed, failed
+        if not outcomes:
+            return 0, 0
+        return sum(item[0] for item in outcomes), sum(item[1] for item in outcomes)
 
     async def _in_slot(
         self,
+        slots: asyncio.Semaphore | None,
         handle: Callable[[str, dict[str, str]], Any],
         message_id: str,
         fields: dict[str, str],
     ) -> tuple[int, int]:
         if self._stopping():
             return 0, 0
-        if self._scan_slots is None:
+        if slots is None:
             return await handle(message_id, fields)
-        async with self._scan_slots:
+        async with slots:
             if self._stopping():
                 return 0, 0
             return await handle(message_id, fields)
 
     async def _handle_message_body(
-        self, message_id: str, fields: dict[str, str]
+        self,
+        message_id: str,
+        fields: dict[str, str],
+        *,
+        queue: str,
+        group: str,
     ) -> tuple[int, int]:
         mint = str(fields.get("mint") or "")
         trace_id = str(fields.get("trace_id") or "") or new_trace_id()
         try:
             if not mint:
-                await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
+                await self._redis.xack(queue, group, message_id)
                 with bind_trace(trace_id):
                     logger.warning(
                         "risk_scan_failed",
@@ -221,7 +328,7 @@ class RiskScanWorker:
                     RISK_HEAVY_QUEUE,
                     {"mint": mint, "trace_id": trace_id},
                 )
-            await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
+            await self._redis.xack(queue, group, message_id)
             return 1, 0
         except Exception as exc:
             with bind_trace(trace_id):
@@ -234,7 +341,15 @@ class RiskScanWorker:
                 )
             return 0, 1
 
-    async def _handle_heavy_body(self, message_id: str, fields: dict[str, str]) -> tuple[int, int]:
+    async def _handle_heavy_body(
+        self,
+        message_id: str,
+        fields: dict[str, str],
+        *,
+        queue: str,
+        group: str,
+    ) -> tuple[int, int]:
+        del queue, group
         mint = str(fields.get("mint") or "")
         trace_id = str(fields.get("trace_id") or "") or new_trace_id()
         try:
@@ -520,6 +635,21 @@ class RiskScanWorker:
             if "BUSYGROUP" not in str(exc):
                 raise
         self._heavy_group_ready = True
+
+    async def _ensure_priority_group(self) -> None:
+        if self._priority_group_ready:
+            return
+        try:
+            await self._redis.xgroup_create(
+                RISK_SCAN_PRIORITY_QUEUE,
+                RISK_SCAN_PRIORITY_GROUP,
+                id="0",
+                mkstream=True,
+            )
+        except ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+        self._priority_group_ready = True
 
     async def _read(
         self,

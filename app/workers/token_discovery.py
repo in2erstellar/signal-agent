@@ -30,6 +30,7 @@ from app.config import (
     DISCOVERY_FRESH_WINDOW_HOURS,
     DISCOVERY_PENDING_BATCH,
     DISCOVERY_PENDING_MAX_AGE_HOURS,
+    RISK_SCAN_PRIORITY_QUEUE,
     RISK_SCAN_QUEUE,
 )
 from app.db.models import Token
@@ -158,7 +159,7 @@ class TokenDiscovery:
                 token.funder_graph_status = FUNDER_GRAPH_PENDING_POST
                 token.trace_id = trace_id
                 await self._redis.xadd(
-                    RISK_SCAN_QUEUE,
+                    RISK_SCAN_PRIORITY_QUEUE,
                     {"mint": event.mint, "trace_id": trace_id, "reason": "post_migration"},
                 )
         self.migrations_queued += 1

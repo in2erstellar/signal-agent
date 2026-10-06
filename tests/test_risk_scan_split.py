@@ -17,6 +17,8 @@ from app.config import (
     RISK_HEAVY_GROUP,
     RISK_HEAVY_QUEUE,
     RISK_SCAN_GROUP,
+    RISK_SCAN_PRIORITY_GROUP,
+    RISK_SCAN_PRIORITY_QUEUE,
     RISK_SCAN_QUEUE,
 )
 from app.db.models import Signal, Token
@@ -342,3 +344,124 @@ async def test_skipped_pre_migration_keeps_funder_exposure_unavailable(stack: tu
     assert "check_funder_cluster_exposure:unavailable" in flags
     assert "check_holder_concentration:unavailable" not in flags
     assert token.heavy_scan_status != HEAVY_SCAN_PENDING
+
+
+MIGRATION_MINT = "MigrateMint11111111111111111111111111111111"
+
+
+async def test_post_migration_is_scanned_before_an_earlier_qualify(stack: tuple) -> None:
+    sessions, redis, _engine = stack
+    facts = _Facts()
+    seen: list[str] = []
+
+    async def mint_view(mint: str) -> MintView:
+        seen.append(mint)
+        return MintView(None, None, 1_000_000)
+
+    facts.mint_view = mint_view  # type: ignore[method-assign]
+    graph = _Graph()
+    clock = _Clock(T0)
+    await _seed(sessions, redis)
+    async with sessions() as session:
+        async with session.begin():
+            await insert_token(
+                session,
+                mint=MIGRATION_MINT,
+                first_seen_at=T0,
+                creator_address=CREATOR,
+                funder_graph_status=FUNDER_GRAPH_PENDING_POST,
+            )
+    await redis.xadd(
+        RISK_SCAN_PRIORITY_QUEUE,
+        {"mint": MIGRATION_MINT, "trace_id": "trace-migration", "reason": "post_migration"},
+    )
+    worker = _worker(sessions, redis, facts, graph, clock)
+
+    processed, failed = await worker.run_once()
+    assert (processed, failed) == (2, 0)
+    # mint and freeze each read the mint account, so the migration occupies
+    # the first two reads. Qualify does not start until that batch returns.
+    assert seen[:3] == [MIGRATION_MINT, MIGRATION_MINT, MINT]
+    priority_pending = await redis.xpending(RISK_SCAN_PRIORITY_QUEUE, RISK_SCAN_PRIORITY_GROUP)
+    qualify_pending = await redis.xpending(RISK_SCAN_QUEUE, RISK_SCAN_GROUP)
+    assert int(priority_pending["pending"]) == 0
+    assert int(qualify_pending["pending"]) == 0
+
+
+async def test_priority_message_acks_its_own_stream_and_enqueues_heavy(stack: tuple) -> None:
+    sessions, redis, _engine = stack
+    facts = _Facts()
+    graph = _Graph()
+    clock = _Clock(T0)
+    async with sessions() as session:
+        async with session.begin():
+            await insert_token(
+                session,
+                mint=MIGRATION_MINT,
+                first_seen_at=T0,
+                creator_address=CREATOR,
+                funder_graph_status=FUNDER_GRAPH_PENDING_POST,
+            )
+    await redis.xadd(
+        RISK_SCAN_PRIORITY_QUEUE,
+        {"mint": MIGRATION_MINT, "trace_id": "trace-migration", "reason": "post_migration"},
+    )
+    worker = _worker(sessions, redis, facts, graph, clock)
+
+    processed, failed = await worker.run_once()
+    assert (processed, failed) == (1, 0)
+    assert facts.holder_calls == 0
+    assert graph.calls == []
+    assert await redis.xlen(RISK_SCAN_QUEUE) == 0
+    assert await redis.xlen(RISK_HEAVY_QUEUE) == 1
+    priority_pending = await redis.xpending(RISK_SCAN_PRIORITY_QUEUE, RISK_SCAN_PRIORITY_GROUP)
+    assert int(priority_pending["pending"]) == 0
+
+    async with sessions() as session:
+        token = await session.scalar(select(Token).where(Token.mint == MIGRATION_MINT))
+    assert token is not None
+    assert token.risk_score is None
+    assert token.heavy_scan_status == HEAVY_SCAN_PENDING
+    flags = list(token.risk_flags or [])
+    assert "check_holder_concentration:unavailable" in flags
+    assert "check_funder_cluster_exposure:unavailable" in flags
+    assert "check_mint_authority:unavailable" not in flags
+    assert "check_freeze_authority:unavailable" not in flags
+    assert "check_lp_lock:unavailable" not in flags
+
+
+async def test_startup_moves_undelivered_post_migrations_and_leaves_the_pel(stack: tuple) -> None:
+    sessions, redis, _engine = stack
+    claimed = await redis.xadd(
+        RISK_SCAN_QUEUE,
+        {"mint": "claimed-migration", "trace_id": "t-claimed", "reason": "post_migration"},
+    )
+    await redis.xadd(RISK_SCAN_QUEUE, {"mint": MINT, "trace_id": "t-qualify"})
+    waiting = await redis.xadd(
+        RISK_SCAN_QUEUE,
+        {"mint": MIGRATION_MINT, "trace_id": "t-waiting", "reason": "post_migration"},
+    )
+    await redis.xgroup_create(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, id="0", mkstream=True)
+    delivered = await redis.xreadgroup(
+        groupname=RISK_SCAN_GROUP,
+        consumername="risk-scan",
+        streams={RISK_SCAN_QUEUE: ">"},
+        count=1,
+    )
+    assert delivered[0][1][0][0] == claimed
+
+    worker = _worker(sessions, redis, _Facts(), _Graph(), _Clock(T0))
+    assert await worker.move_undelivered_post_migrations() == 1
+    assert await worker.move_undelivered_post_migrations() == 0
+
+    entries = await redis.xrange(RISK_SCAN_QUEUE)
+    assert [item[1]["mint"] for item in entries] == ["claimed-migration", MINT]
+    assert waiting not in [item[0] for item in entries]
+    priority = await redis.xrange(RISK_SCAN_PRIORITY_QUEUE)
+    assert len(priority) == 1
+    assert priority[0][1]["mint"] == MIGRATION_MINT
+    assert priority[0][1]["reason"] == "post_migration"
+    assert priority[0][1]["trace_id"] == "t-waiting"
+    pending = await redis.xpending(RISK_SCAN_QUEUE, RISK_SCAN_GROUP)
+    assert int(pending["pending"]) == 1
+    assert pending["min"] == claimed

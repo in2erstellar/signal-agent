@@ -24,6 +24,7 @@ from app.config import (
     AI_REVIEW_QUEUE,
     BAIT_CHECK_QUEUE,
     RISK_HEAVY_QUEUE,
+    RISK_SCAN_PRIORITY_QUEUE,
     RISK_SCAN_QUEUE,
 )
 from app.services.ai_budget import review_counts, tokens_used
@@ -105,6 +106,7 @@ def record_risk_scan_latency(seconds: float) -> None:
 async def collect_queue_sizes(redis: Redis) -> None:
     try:
         risk_depth = int(await redis.xlen(RISK_SCAN_QUEUE))
+        priority_depth = int(await redis.xlen(RISK_SCAN_PRIORITY_QUEUE))
         heavy_depth = int(await redis.xlen(RISK_HEAVY_QUEUE))
         bait_depth = int(await redis.zcard(BAIT_CHECK_QUEUE))
         review_depth = int(await redis.xlen(AI_REVIEW_QUEUE))
@@ -115,6 +117,7 @@ async def collect_queue_sizes(redis: Redis) -> None:
         logger.warning("queue_metrics_unavailable", error=type(exc).__name__)
         return
     REDIS_QUEUE_SIZE.labels(queue=RISK_SCAN_QUEUE).set(risk_depth)
+    REDIS_QUEUE_SIZE.labels(queue=RISK_SCAN_PRIORITY_QUEUE).set(priority_depth)
     REDIS_QUEUE_SIZE.labels(queue=RISK_HEAVY_QUEUE).set(heavy_depth)
     REDIS_QUEUE_SIZE.labels(queue=BAIT_CHECK_QUEUE).set(bait_depth)
     REDIS_QUEUE_SIZE.labels(queue=AI_REVIEW_QUEUE).set(review_depth)

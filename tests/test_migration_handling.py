@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.adapters.pumpportal import MigrationEvent, NewTokenEvent
-from app.config import RISK_SCAN_QUEUE
+from app.config import RISK_SCAN_PRIORITY_QUEUE, RISK_SCAN_QUEUE
 from app.db.models import Token
 from app.services.risk_scanner import CheckResult, RiskReport
 from app.services.token_store import (
@@ -127,16 +127,18 @@ async def test_migration_clears_skip_and_requeues_once(stack: tuple) -> None:
     token = await _token(sessions)
     assert token is not None
     assert token.funder_graph_status == FUNDER_GRAPH_PENDING_POST
-    assert await redis.xlen(RISK_SCAN_QUEUE) == 1
-    fields = (await redis.xrange(RISK_SCAN_QUEUE))[0][1]
+    assert await redis.xlen(RISK_SCAN_QUEUE) == 0
+    assert await redis.xlen(RISK_SCAN_PRIORITY_QUEUE) == 1
+    fields = (await redis.xrange(RISK_SCAN_PRIORITY_QUEUE))[0][1]
     assert fields["mint"] == MINT
     assert fields["reason"] == "post_migration"
     assert fields["trace_id"]
 
     assert await discovery.handle_migration(_migration()) is False
-    assert await redis.xlen(RISK_SCAN_QUEUE) == 1
+    assert await redis.xlen(RISK_SCAN_PRIORITY_QUEUE) == 1
+    assert await redis.xlen(RISK_SCAN_QUEUE) == 0
     assert await discovery.handle_migration(_migration("missing-mint")) is False
-    assert await redis.xlen(RISK_SCAN_QUEUE) == 1
+    assert await redis.xlen(RISK_SCAN_PRIORITY_QUEUE) == 1
 
     async with sessions() as session:
         async with session.begin():
@@ -145,7 +147,8 @@ async def test_migration_clears_skip_and_requeues_once(stack: tuple) -> None:
             assert row is not None
             row.funder_graph_status = FUNDER_GRAPH_BUILT
     assert await discovery.handle_migration(_migration("wallet-mint")) is False
-    assert await redis.xlen(RISK_SCAN_QUEUE) == 1
+    assert await redis.xlen(RISK_SCAN_PRIORITY_QUEUE) == 1
+    assert await redis.xlen(RISK_SCAN_QUEUE) == 0
 
 
 async def test_post_migration_scan_builds_a_fresh_graph(stack: tuple) -> None:
