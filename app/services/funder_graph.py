@@ -93,12 +93,42 @@ def funder_lookup_failure(wallet_address: str, exc: Exception) -> FunderLookupFa
     return None
 
 
+# The RPC refuses getTokenLargestAccounts for a mint whose holder set is too
+# large to scan. The same body comes back on every attempt.
+_HOLDER_LIST_PERMANENT_MARKERS = (
+    "too many accounts",
+    "too many pubkeys",
+)
+
+
+def holder_list_failure(mint: str, exc: Exception) -> FunderLookupFailure | None:
+    """Classify a Helius error from ``get_top_holder_owners``.
+
+    A holder-count refusal is permanent on the first attempt: retrying
+    ``getTokenLargestAccounts`` cannot shrink the mint. Every other Helius
+    error uses the funded-by rules, so a timeout or 429 is counted and a 4xx
+    is permanent. Anything that is not a Helius error stays unwrapped.
+    """
+    failure = funder_lookup_failure(mint, exc)
+    if failure is None:
+        return None
+    if any(marker in str(exc).lower() for marker in _HOLDER_LIST_PERMANENT_MARKERS):
+        return FunderLookupFailure(
+            mint,
+            status_code=failure.status_code,
+            permanent=True,
+            message=str(exc),
+        )
+    return failure
+
+
 class FundingLookup(Protocol):
     """Что билдеру нужно от Helius. Живой клиент и тестовый двойник оба это закрывают."""
 
     async def get_top_holder_owners(self, mint: str, top_n: int) -> list[str]: ...
 
     async def find_first_funding_tx(self, wallet_address: str) -> FundingInfo | None: ...
+
 
 # Меньше трёх холдеров — слишком слабый сигнал: общий фандер бывает и у пары
 # обычных кошельков. Порог зафиксирован задачей.
@@ -327,7 +357,13 @@ class FunderGraphBuilder:
         token_mint: str,
         top_n_holders: int,
     ) -> list[FunderCluster]:
-        holders = await self._helius.get_top_holder_owners(token_mint, top_n_holders)
+        try:
+            holders = await self._helius.get_top_holder_owners(token_mint, top_n_holders)
+        except Exception as exc:
+            failure = holder_list_failure(token_mint, exc)
+            if failure is None:
+                raise
+            raise failure from exc
         unique_holders = list(dict.fromkeys(holders))
         funding_cache: dict[str, FundingInfo | None] = {}
 
@@ -442,9 +478,7 @@ class FunderGraphBuilder:
     ) -> list[FunderCluster]:
         # Повторный прогон по тому же mint заменяет прошлые кластеры,
         # а не копит дубли. Рёбра wallet_funders глобальные и остаются.
-        await self._session.execute(
-            delete(FunderCluster).where(FunderCluster.token_id == token.id)
-        )
+        await self._session.execute(delete(FunderCluster).where(FunderCluster.token_id == token.id))
         detected_at = datetime.now(timezone.utc)
         stored: list[FunderCluster] = []
         for cluster in clusters:

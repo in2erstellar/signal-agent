@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 from redis.asyncio import Redis
@@ -11,11 +12,28 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.adapters.helius import HeliusError, HeliusRateLimitError, HeliusResponseError
-from app.config import RISK_HEAVY_GROUP, RISK_HEAVY_QUEUE, RISK_SCAN_GROUP, RISK_SCAN_QUEUE
+from app.config import (
+    RISK_CHECK_WEIGHTS,
+    RISK_HEAVY_GROUP,
+    RISK_HEAVY_QUEUE,
+    RISK_SCAN_GROUP,
+    RISK_SCAN_QUEUE,
+)
 from app.db.models import Token
-from app.services.funder_graph import FunderGraphBuilder, FunderLookupFailure, funder_lookup_failure
+from app.services.funder_graph import (
+    FunderGraphBuilder,
+    FunderLookupFailure,
+    funder_lookup_failure,
+    holder_list_failure,
+)
 from app.services.risk_scanner import CheckResult, RiskReport
-from app.services.token_store import FUNDER_GRAPH_FAILED, FUNDER_GRAPH_PENDING_POST, insert_token
+from app.services.token_store import (
+    FUNDER_GRAPH_FAILED,
+    FUNDER_GRAPH_PENDING_POST,
+    HEAVY_SCAN_FAILED,
+    HEAVY_SCAN_PENDING,
+    insert_token,
+)
 from app.workers.risk_scan_worker import RiskScanWorker
 from tests.pipeline_containers import truncate_pipeline
 
@@ -88,6 +106,57 @@ class _NoCache:
         return None
 
 
+def test_too_many_accounts_is_permanent_for_the_holder_list() -> None:
+    failure = holder_list_failure(
+        MINT,
+        HeliusResponseError(
+            200,
+            "getTokenLargestAccounts: Too many accounts requested (10000000 pubkeys)",
+        ),
+    )
+    assert failure is not None
+    assert failure.permanent is True
+    assert failure.wallet_address == MINT
+    assert failure.status_code == 200
+
+    # A server error on the same call is still counted, then acked. It is not
+    # a property of the mint the way an oversized holder set is.
+    transient = holder_list_failure(
+        MINT,
+        HeliusResponseError(500, "getTokenLargestAccounts: internal"),
+    )
+    assert transient is not None
+    assert transient.permanent is False
+    assert transient.status_code == 500
+
+
+class _TooManyHolders:
+    def __init__(self, message: str, status_code: int = 200) -> None:
+        self.message = message
+        self.status_code = status_code
+        self.calls = 0
+
+    async def get_top_holder_owners(self, mint: str, top_n: int) -> list[str]:
+        del mint, top_n
+        self.calls += 1
+        raise HeliusResponseError(self.status_code, self.message)
+
+    async def find_first_funding_tx(self, wallet_address: str) -> None:
+        raise AssertionError(f"funded-by must not run for {wallet_address}")
+
+
+async def test_builder_wraps_an_oversized_holder_list_as_permanent() -> None:
+    helius = _TooManyHolders(
+        "getTokenLargestAccounts: Too many accounts requested (10000000 pubkeys)"
+    )
+    builder = FunderGraphBuilder(_NoCache(), helius)  # type: ignore[arg-type]
+    with pytest.raises(FunderLookupFailure) as caught:
+        await builder.build_graph_for_token(MINT)
+    assert caught.value.permanent is True
+    assert caught.value.wallet_address == MINT
+    assert helius.calls == 1
+
+
 async def test_builder_wraps_funded_by_403_with_the_wallet() -> None:
     builder = FunderGraphBuilder(_NoCache(), _Helius403())  # type: ignore[arg-type]
     with pytest.raises(FunderLookupFailure) as caught:
@@ -127,11 +196,15 @@ async def _enqueue(sessions: async_sessionmaker[AsyncSession], redis: Redis) -> 
     await redis.xadd(RISK_SCAN_QUEUE, {"mint": MINT, "trace_id": "trace-funder"})
 
 
-async def _status(sessions: async_sessionmaker[AsyncSession]) -> str | None:
+async def _token(sessions: async_sessionmaker[AsyncSession]) -> Token:
     async with sessions() as session:
         token = await session.scalar(select(Token).where(Token.mint == MINT))
     assert token is not None
-    return token.funder_graph_status
+    return token
+
+
+async def _status(sessions: async_sessionmaker[AsyncSession]) -> str | None:
+    return (await _token(sessions)).funder_graph_status
 
 
 async def _pending(
@@ -215,3 +288,73 @@ async def test_transient_429_retries_then_stops(stack: tuple) -> None:
     processed, failed = await worker.run_once()
     assert graph.calls == 2
     assert (processed, failed) == (1, 0)
+
+
+async def test_too_many_accounts_acks_without_retry(stack: tuple) -> None:
+    sessions, redis = stack
+    helius = _TooManyHolders(
+        "getTokenLargestAccounts: Too many accounts requested (10000000 pubkeys)"
+    )
+    worker = RiskScanWorker(
+        sessions,
+        redis,
+        lambda session: FunderGraphBuilder(session, helius),  # type: ignore[arg-type]
+        lambda _session, _clusters: _FastScanner(),
+    )
+    await _enqueue(sessions, redis)
+
+    processed, failed = await worker.run_once()
+    assert (processed, failed) == (1, 0)
+    assert helius.calls == 0
+    assert (await _token(sessions)).heavy_scan_status == HEAVY_SCAN_PENDING
+
+    processed, failed = await worker.run_heavy_once()
+    assert (processed, failed) == (0, 1)
+    assert helius.calls == 1
+    assert await _pending(redis) == 0
+
+    token = await _token(sessions)
+    known = (
+        RISK_CHECK_WEIGHTS["check_mint_authority"]
+        + RISK_CHECK_WEIGHTS["check_freeze_authority"]
+        + RISK_CHECK_WEIGHTS["check_lp_lock"]
+    )
+    assert token.risk_score == Decimal(known)
+    assert token.heavy_scan_status == HEAVY_SCAN_FAILED
+    assert token.funder_graph_status == FUNDER_GRAPH_FAILED
+    flags = list(token.risk_flags or [])
+    assert "check_holder_concentration:unavailable" in flags
+    assert "check_funder_cluster_exposure:unavailable" in flags
+    assert token.dev_distribution_status is None
+
+    processed, failed = await worker.run_heavy_once()
+    assert (processed, failed) == (0, 0)
+    assert helius.calls == 1
+
+
+async def test_holder_list_server_error_retries_then_acks(stack: tuple) -> None:
+    sessions, redis = stack
+    helius = _TooManyHolders("getTokenLargestAccounts: internal", status_code=500)
+    worker = RiskScanWorker(
+        sessions,
+        redis,
+        lambda session: FunderGraphBuilder(session, helius),  # type: ignore[arg-type]
+        lambda _session, _clusters: _FastScanner(),
+        retry_backoff_seconds=0,
+    )
+    await _enqueue(sessions, redis)
+    assert (await worker.run_once()) == (1, 0)
+
+    processed, failed = await worker.run_heavy_once()
+    assert (processed, failed) == (0, 1)
+    assert helius.calls == 1
+    assert await _status(sessions) == FUNDER_GRAPH_PENDING_POST
+    assert (await _token(sessions)).heavy_scan_status == HEAVY_SCAN_PENDING
+    assert await _pending(redis) == 1
+
+    processed, failed = await worker.run_heavy_once()
+    assert (processed, failed) == (0, 1)
+    assert helius.calls == 2
+    assert await _status(sessions) == FUNDER_GRAPH_FAILED
+    assert (await _token(sessions)).heavy_scan_status == HEAVY_SCAN_FAILED
+    assert await _pending(redis) == 0
