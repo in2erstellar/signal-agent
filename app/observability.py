@@ -23,6 +23,7 @@ from app.config import (
     AI_REVIEW_HOURLY_BUDGET,
     AI_REVIEW_QUEUE,
     BAIT_CHECK_QUEUE,
+    RISK_HEAVY_QUEUE,
     RISK_SCAN_QUEUE,
 )
 from app.services.ai_budget import review_counts, tokens_used
@@ -39,7 +40,7 @@ ALERTS_SENT = Counter(
 )
 RISK_SCAN_LATENCY = Histogram(
     "signalforge_risk_scan_latency_seconds",
-    "Time to build the funder graph and score one mint.",
+    "Time from claim to ack on risk_scan_queue, before the heavy queue.",
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
 )
 REDIS_QUEUE_SIZE = Gauge(
@@ -104,6 +105,7 @@ def record_risk_scan_latency(seconds: float) -> None:
 async def collect_queue_sizes(redis: Redis) -> None:
     try:
         risk_depth = int(await redis.xlen(RISK_SCAN_QUEUE))
+        heavy_depth = int(await redis.xlen(RISK_HEAVY_QUEUE))
         bait_depth = int(await redis.zcard(BAIT_CHECK_QUEUE))
         review_depth = int(await redis.xlen(AI_REVIEW_QUEUE))
         now = datetime.now(timezone.utc)
@@ -113,6 +115,7 @@ async def collect_queue_sizes(redis: Redis) -> None:
         logger.warning("queue_metrics_unavailable", error=type(exc).__name__)
         return
     REDIS_QUEUE_SIZE.labels(queue=RISK_SCAN_QUEUE).set(risk_depth)
+    REDIS_QUEUE_SIZE.labels(queue=RISK_HEAVY_QUEUE).set(heavy_depth)
     REDIS_QUEUE_SIZE.labels(queue=BAIT_CHECK_QUEUE).set(bait_depth)
     REDIS_QUEUE_SIZE.labels(queue=AI_REVIEW_QUEUE).set(review_depth)
     AI_REVIEW_CALLS_LAST_HOUR.set(hour)

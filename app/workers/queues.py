@@ -8,6 +8,8 @@ from app.config import (
     AI_REVIEW_GROUP,
     AI_REVIEW_QUEUE,
     BAIT_CHECK_QUEUE,
+    RISK_HEAVY_GROUP,
+    RISK_HEAVY_QUEUE,
     RISK_SCAN_GROUP,
     RISK_SCAN_QUEUE,
 )
@@ -17,6 +19,8 @@ __all__ = [
     "AI_REVIEW_GROUP",
     "AI_REVIEW_QUEUE",
     "BAIT_CHECK_QUEUE",
+    "RISK_HEAVY_GROUP",
+    "RISK_HEAVY_QUEUE",
     "RISK_SCAN_GROUP",
     "RISK_SCAN_QUEUE",
     "bait_member",

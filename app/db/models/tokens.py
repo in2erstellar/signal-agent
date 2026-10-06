@@ -65,6 +65,10 @@ class Token(Base):
     dev_distribution_status: Mapped[str | None] = mapped_column(String)
     dev_distribution_share: Mapped[Decimal | None] = mapped_column(Numeric)
     dev_distribution_reason: Mapped[str | None] = mapped_column(String)
+    # pending: risk_scan_queue is acked and risk_heavy_queue has not finished.
+    # complete: heavy checks were written. failed: the funder walk gave up.
+    # NULL: the row never entered the split scan.
+    heavy_scan_status: Mapped[str | None] = mapped_column(String)
 
     transactions: Mapped[list[WalletTx]] = relationship(
         back_populates="token",
@@ -108,6 +112,11 @@ class Token(Base):
             "dev_distribution_status IS NULL OR dev_distribution_status IN "
             "('measured', 'unavailable')",
             name="dev_distribution_status_values",
+        ),
+        CheckConstraint(
+            "heavy_scan_status IS NULL OR heavy_scan_status IN "
+            "('pending', 'complete', 'failed')",
+            name="heavy_scan_status_values",
         ),
         Index("ix_tokens_creator_address", "creator_address"),
     )

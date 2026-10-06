@@ -52,13 +52,29 @@ class _Graph:
 
 
 class _Scanner:
-    async def scan_token(self, mint: str) -> RiskReport:
+    async def scan_fast(self, mint: str) -> RiskReport:
         return RiskReport(
             mint=mint,
-            risk_score=40,
-            checks=[CheckResult(name="check_mint_authority", passed=True, detail="renounced")],
+            risk_score=70,
+            checks=[
+                CheckResult(name="check_mint_authority", passed=True, detail="renounced"),
+                CheckResult(name="check_freeze_authority", passed=True, detail="renounced"),
+                CheckResult(name="check_lp_lock", passed=True, detail="locked"),
+            ],
             scanned_at=T0,
             liquidity_usd=Decimal("9000"),
+            pool_status="no_pool",
+        )
+
+    async def scan_heavy(self, mint: str) -> RiskReport:
+        return RiskReport(
+            mint=mint,
+            risk_score=30,
+            checks=[
+                CheckResult(name="check_holder_concentration", passed=True, detail="spread"),
+                CheckResult(name="check_funder_cluster_exposure", passed=True, detail="none"),
+            ],
+            scanned_at=T0,
         )
 
 
@@ -152,6 +168,10 @@ async def test_post_migration_scan_builds_a_fresh_graph(stack: tuple) -> None:
     assert await discovery.handle_migration(_migration()) is True
     processed, failed = await worker.run_once()
     assert (processed, failed) == (1, 0)
+    assert graph.calls == []
+    processed, failed = await worker.run_heavy_once()
+    # The pre-migration ack also left a heavy message. The walk still runs once.
+    assert (processed, failed) == (2, 0)
     assert graph.calls == [MINT]
     token = await _token(sessions)
     assert token is not None

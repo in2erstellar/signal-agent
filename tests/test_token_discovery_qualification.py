@@ -201,11 +201,27 @@ async def test_synthetic_hour_qualifies_only_the_injected_second_buyers(
 
 
 class _Scanner:
-    async def scan_token(self, mint: str) -> RiskReport:
+    async def scan_fast(self, mint: str) -> RiskReport:
         return RiskReport(
             mint=mint,
-            risk_score=40,
-            checks=[CheckResult(name="check_mint_authority", passed=True, detail="renounced")],
+            risk_score=70,
+            checks=[
+                CheckResult(name="check_mint_authority", passed=True, detail="renounced"),
+                CheckResult(name="check_freeze_authority", passed=True, detail="renounced"),
+                CheckResult(name="check_lp_lock", passed=True, detail="locked"),
+            ],
+            scanned_at=T0,
+            pool_status="no_pool",
+        )
+
+    async def scan_heavy(self, mint: str) -> RiskReport:
+        return RiskReport(
+            mint=mint,
+            risk_score=30,
+            checks=[
+                CheckResult(name="check_holder_concentration", passed=True, detail="spread"),
+                CheckResult(name="check_funder_cluster_exposure", passed=True, detail="none"),
+            ],
             scanned_at=T0,
         )
 
@@ -237,6 +253,13 @@ async def test_pre_migration_scan_skips_funder_graph_and_wallet_rows_do_not(
     assert calls == []
     token = await _token(sessions)
     assert token is not None
+    assert token.risk_score is None
+    assert token.funder_graph_status == FUNDER_GRAPH_SKIPPED
+    processed, failed = await worker.run_heavy_once()
+    assert (processed, failed) == (1, 0)
+    assert calls == []
+    token = await _token(sessions)
+    assert token is not None
     assert token.risk_score is not None
     assert token.funder_graph_status == FUNDER_GRAPH_SKIPPED
 
@@ -258,6 +281,9 @@ async def test_pre_migration_scan_skips_funder_graph_and_wallet_rows_do_not(
         lambda _session, clusters: _Scanner(),
     )
     processed, failed = await worker.run_once()
+    assert (processed, failed) == (1, 0)
+    assert calls == []
+    processed, failed = await worker.run_heavy_once()
     assert (processed, failed) == (1, 0)
     assert calls == ["wallet-mint"]
     wallet = await _token(sessions, "wallet-mint")

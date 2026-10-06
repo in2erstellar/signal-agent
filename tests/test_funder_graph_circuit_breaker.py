@@ -11,9 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.adapters.helius import HeliusError, HeliusRateLimitError, HeliusResponseError
-from app.config import RISK_SCAN_GROUP, RISK_SCAN_QUEUE
+from app.config import RISK_HEAVY_GROUP, RISK_HEAVY_QUEUE, RISK_SCAN_GROUP, RISK_SCAN_QUEUE
 from app.db.models import Token
 from app.services.funder_graph import FunderGraphBuilder, FunderLookupFailure, funder_lookup_failure
+from app.services.risk_scanner import CheckResult, RiskReport
 from app.services.token_store import FUNDER_GRAPH_FAILED, FUNDER_GRAPH_PENDING_POST, insert_token
 from app.workers.risk_scan_worker import RiskScanWorker
 from tests.pipeline_containers import truncate_pipeline
@@ -23,6 +24,21 @@ pytest_plugins = ["tests.pipeline_containers"]
 WALLET = "7ExZPpQWWXBuf92bVGGser6S1ANE28po75rwwZ1TnG4g"
 MINT = "2VeuwcJYtu9P1g27a1UahFsJmVZRBWfBvLJcuzvApump"
 T0 = datetime(2026, 9, 25, 20, 38, tzinfo=timezone.utc)
+
+
+class _FastScanner:
+    async def scan_fast(self, mint: str) -> RiskReport:
+        return RiskReport(
+            mint=mint,
+            risk_score=70,
+            checks=[
+                CheckResult(name="check_mint_authority", passed=True, detail="renounced"),
+                CheckResult(name="check_freeze_authority", passed=True, detail="renounced"),
+                CheckResult(name="check_lp_lock", passed=True, detail="locked"),
+            ],
+            scanned_at=T0,
+            pool_status="no_pool",
+        )
 
 
 class _Graph:
@@ -118,8 +134,10 @@ async def _status(sessions: async_sessionmaker[AsyncSession]) -> str | None:
     return token.funder_graph_status
 
 
-async def _pending(redis: Redis) -> int:
-    info = await redis.xpending(RISK_SCAN_QUEUE, RISK_SCAN_GROUP)
+async def _pending(
+    redis: Redis, queue: str = RISK_HEAVY_QUEUE, group: str = RISK_HEAVY_GROUP
+) -> int:
+    info = await redis.xpending(queue, group)
     return int(info["pending"])
 
 
@@ -137,11 +155,15 @@ async def test_repeated_403_is_acked_and_not_retried(stack: tuple) -> None:
         sessions,
         redis,
         lambda _session: graph,
-        lambda _session, _clusters: None,  # type: ignore[return-value, misc]
+        lambda _session, _clusters: _FastScanner(),
     )
     await _enqueue(sessions, redis)
 
     processed, failed = await worker.run_once()
+    assert (processed, failed) == (1, 0)
+    assert graph.calls == 0
+    assert await _pending(redis, RISK_SCAN_QUEUE, RISK_SCAN_GROUP) == 0
+    processed, failed = await worker.run_heavy_once()
     assert (processed, failed) == (0, 1)
     assert graph.calls == 1
     assert await _status(sessions) == FUNDER_GRAPH_FAILED
@@ -152,7 +174,7 @@ async def test_repeated_403_is_acked_and_not_retried(stack: tuple) -> None:
     assert (processed, failed) == (1, 0)
     assert graph.calls == 1
     assert await _status(sessions) == FUNDER_GRAPH_FAILED
-    assert await _pending(redis) == 0
+    assert await _pending(redis, RISK_SCAN_QUEUE, RISK_SCAN_GROUP) == 0
 
 
 async def test_transient_429_retries_then_stops(stack: tuple) -> None:
@@ -169,18 +191,21 @@ async def test_transient_429_retries_then_stops(stack: tuple) -> None:
         sessions,
         redis,
         lambda _session: graph,
-        lambda _session, _clusters: None,  # type: ignore[return-value, misc]
+        lambda _session, _clusters: _FastScanner(),
         retry_backoff_seconds=0,
     )
     await _enqueue(sessions, redis)
 
     processed, failed = await worker.run_once()
+    assert (processed, failed) == (1, 0)
+    assert graph.calls == 0
+    processed, failed = await worker.run_heavy_once()
     assert (processed, failed) == (0, 1)
     assert graph.calls == 1
     assert await _status(sessions) == FUNDER_GRAPH_PENDING_POST
     assert await _pending(redis) == 1
 
-    processed, failed = await worker.run_once()
+    processed, failed = await worker.run_heavy_once()
     assert (processed, failed) == (0, 1)
     assert graph.calls == 2
     assert await _status(sessions) == FUNDER_GRAPH_FAILED

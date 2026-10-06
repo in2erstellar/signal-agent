@@ -1,7 +1,9 @@
-"""Consumer for ``risk_scan_queue``.
+"""Consumers for ``risk_scan_queue`` and ``risk_heavy_queue``.
 
-Builds the funder graph once, then scores the mint. The scanner's cluster
-check reads that result instead of calling Helius a second time.
+The fast consumer reads mint, freeze, and LP, then acks. Holder
+concentration, the funder walk, and creator-cluster distribution run on the
+heavy consumer. Both use the scan semaphore passed into this worker. The
+Helius client is the one inside the funder and scanner factories.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -18,7 +21,14 @@ from redis.exceptions import ResponseError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.config import MAX_FUNDER_LOOKUP_RETRIES, RISK_SCAN_GROUP, RISK_SCAN_QUEUE
+from app.config import (
+    MAX_FUNDER_LOOKUP_RETRIES,
+    RISK_CHECK_WEIGHTS,
+    RISK_HEAVY_GROUP,
+    RISK_HEAVY_QUEUE,
+    RISK_SCAN_GROUP,
+    RISK_SCAN_QUEUE,
+)
 from app.db.models import FunderCluster, Token
 from app.observability import bind_trace, new_trace_id, record_risk_scan_latency
 from app.services.creator_cluster import measure_distribution
@@ -32,6 +42,9 @@ from app.services.token_store import (
     FUNDER_GRAPH_FAILED,
     FUNDER_GRAPH_PENDING_POST,
     FUNDER_GRAPH_SKIPPED,
+    HEAVY_SCAN_COMPLETE,
+    HEAVY_SCAN_FAILED,
+    HEAVY_SCAN_PENDING,
 )
 
 logger = structlog.get_logger(__name__)
@@ -48,6 +61,16 @@ _PROTECTED_FUNDER_STATUSES = frozenset(
 
 FunderFactory = Callable[[AsyncSession], Any]
 ScannerFactory = Callable[[AsyncSession, list[FunderCluster]], RiskScanner]
+
+FAST_CHECKS = (
+    "check_mint_authority",
+    "check_freeze_authority",
+    "check_lp_lock",
+)
+HEAVY_CHECKS = (
+    "check_holder_concentration",
+    "check_funder_cluster_exposure",
+)
 
 
 class PrebuiltClusters:
@@ -97,42 +120,80 @@ class RiskScanWorker:
         self._consumer = consumer_name
         self._group_ready = False
         self._retry_backoff_seconds = retry_backoff_seconds
-        # Whole scan, not a second acquire inside the funder-graph builder.
+        # Shared by the fast ack and the heavy walk. Not acquired again inside
+        # the funder-graph builder: asyncio.Semaphore is not reentrant.
         self._scan_slots = scan_slots
+        self._heavy_group_ready = False
 
     async def run_once(self, *, block_ms: int | None = None) -> tuple[int, int]:
-        await self._ensure_group()
-        messages = await self._read("0", block_ms=None)
-        messages.extend(await self._read(">", block_ms=block_ms))
+        return await self._run_queue(
+            RISK_SCAN_QUEUE,
+            RISK_SCAN_GROUP,
+            self._ensure_group,
+            self._handle_message_body,
+            block_ms=block_ms,
+            cycle_event="risk_scan_cycle",
+        )
+
+    async def run_heavy_once(self, *, block_ms: int | None = None) -> tuple[int, int]:
+        return await self._run_queue(
+            RISK_HEAVY_QUEUE,
+            RISK_HEAVY_GROUP,
+            self._ensure_heavy_group,
+            self._handle_heavy_body,
+            block_ms=block_ms,
+            cycle_event="risk_heavy_cycle",
+        )
+
+    async def _run_queue(
+        self,
+        queue: str,
+        group: str,
+        ensure: Callable[[], Any],
+        handle: Callable[[str, dict[str, str]], Any],
+        *,
+        block_ms: int | None,
+        cycle_event: str,
+    ) -> tuple[int, int]:
+        await ensure()
+        messages = await self._read(queue, group, "0", block_ms=None)
+        messages.extend(await self._read(queue, group, ">", block_ms=block_ms))
         if self._scan_slots is None:
             outcomes: list[tuple[int, int]] = []
             for message_id, fields in messages:
                 if self._stopping():
                     break
-                outcomes.append(await self._handle_message_body(message_id, fields))
+                outcomes.append(await handle(message_id, fields))
         else:
             tasks = [
-                asyncio.create_task(self._handle_message(message_id, fields))
+                asyncio.create_task(self._in_slot(handle, message_id, fields))
                 for message_id, fields in messages
                 if not self._stopping()
             ]
             outcomes = list(await asyncio.gather(*tasks))
         processed = sum(item[0] for item in outcomes)
         failed = sum(item[1] for item in outcomes)
-        logger.info("risk_scan_cycle", processed=processed, failed=failed)
+        logger.info(cycle_event, processed=processed, failed=failed)
         return processed, failed
 
-    async def _handle_message(self, message_id: str, fields: dict[str, str]) -> tuple[int, int]:
+    async def _in_slot(
+        self,
+        handle: Callable[[str, dict[str, str]], Any],
+        message_id: str,
+        fields: dict[str, str],
+    ) -> tuple[int, int]:
         if self._stopping():
             return 0, 0
         if self._scan_slots is None:
-            return await self._handle_message_body(message_id, fields)
+            return await handle(message_id, fields)
         async with self._scan_slots:
             if self._stopping():
                 return 0, 0
-            return await self._handle_message_body(message_id, fields)
+            return await handle(message_id, fields)
 
-    async def _handle_message_body(self, message_id: str, fields: dict[str, str]) -> tuple[int, int]:
+    async def _handle_message_body(
+        self, message_id: str, fields: dict[str, str]
+    ) -> tuple[int, int]:
         mint = str(fields.get("mint") or "")
         trace_id = str(fields.get("trace_id") or "") or new_trace_id()
         try:
@@ -150,15 +211,18 @@ class RiskScanWorker:
             started = time.perf_counter()
             try:
                 with bind_trace(trace_id):
-                    await self._scan(mint, trace_id)
+                    enqueue = await self._scan(mint, trace_id)
             finally:
                 record_risk_scan_latency(time.perf_counter() - started)
+            # Ack only after the heavy message is stored. A failed XADD leaves
+            # this message pending so the next cycle tries the enqueue again.
+            if enqueue:
+                await self._redis.xadd(
+                    RISK_HEAVY_QUEUE,
+                    {"mint": mint, "trace_id": trace_id},
+                )
             await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
             return 1, 0
-        except FunderLookupFailure as exc:
-            with bind_trace(trace_id):
-                await self._handle_lookup_failure(mint, message_id, exc)
-            return 0, 1
         except Exception as exc:
             with bind_trace(trace_id):
                 logger.warning(
@@ -170,7 +234,46 @@ class RiskScanWorker:
                 )
             return 0, 1
 
-    async def _scan(self, mint: str, trace_id: str) -> RiskReport | None:
+    async def _handle_heavy_body(self, message_id: str, fields: dict[str, str]) -> tuple[int, int]:
+        mint = str(fields.get("mint") or "")
+        trace_id = str(fields.get("trace_id") or "") or new_trace_id()
+        try:
+            if not mint:
+                await self._redis.xack(RISK_HEAVY_QUEUE, RISK_HEAVY_GROUP, message_id)
+                with bind_trace(trace_id):
+                    logger.warning(
+                        "risk_heavy_failed",
+                        reason="missing_mint",
+                        message_id=message_id,
+                    )
+                return 0, 1
+            if await self._in_backoff(message_id):
+                return 0, 0
+            with bind_trace(trace_id):
+                await self._scan_heavy(mint, trace_id)
+            await self._redis.xack(RISK_HEAVY_QUEUE, RISK_HEAVY_GROUP, message_id)
+            return 1, 0
+        except FunderLookupFailure as exc:
+            with bind_trace(trace_id):
+                await self._handle_lookup_failure(mint, message_id, exc)
+            return 0, 1
+        except Exception as exc:
+            with bind_trace(trace_id):
+                logger.warning(
+                    "risk_heavy_failed",
+                    mint=mint,
+                    message_id=message_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            return 0, 1
+
+    async def _scan(self, mint: str, trace_id: str) -> bool:
+        """Write the fast checks and return whether a heavy message is required.
+
+        ``False`` means the funder walk already failed for good. The caller
+        acks without enqueueing. Distribution columns are not written here.
+        """
         async with self._sessions() as session:
             async with session.begin():
                 token = await session.scalar(select(Token).where(Token.mint == mint))
@@ -181,10 +284,68 @@ class RiskScanWorker:
                         mint=mint,
                         reason=FUNDER_GRAPH_FAILED,
                     )
-                    return None
+                    return False
+                scanner = self._scanner_factory(session, [])
+                report = await scanner.scan_fast(mint)
+                if token is None:
+                    token = Token(mint=mint, first_seen_at=report.scanned_at)
+                    session.add(token)
+                if report.liquidity_usd is not None:
+                    token.liquidity_usd = report.liquidity_usd
+                token.risk_score = None
+                token.risk_flags = _fast_flags(report)
+                token.heavy_scan_status = HEAVY_SCAN_PENDING
+                token.mint_authority_renounced = _passed(report, "check_mint_authority")
+                token.freeze_authority_renounced = _passed(report, "check_freeze_authority")
+                token.updated_at = report.scanned_at
+                token.trace_id = trace_id
+                logger.info(
+                    "risk_scan_stored",
+                    mint=mint,
+                    risk_score=None,
+                    risk_flags=token.risk_flags,
+                    heavy_scan_status=HEAVY_SCAN_PENDING,
+                )
+                seen_at = report.scanned_at
+                await record_listing(
+                    session,
+                    self._redis,
+                    token,
+                    pool_status=report.pool_status,
+                    price_usd=report.price_usd,
+                    seen_at=seen_at,
+                )
+                lp_book = getattr(scanner, "lp_book", None)
+                rows = (
+                    []
+                    if lp_book is None
+                    else [
+                        LpCustody(row.is_burn_address, row.is_lock_program, row.amount_raw)
+                        for row in lp_book.rows
+                    ]
+                )
+                await record_lp_unlock(session, token, classify_lp_custody(rows))
+        return True
+
+    async def _scan_heavy(self, mint: str, trace_id: str) -> None:
+        async with self._sessions() as session:
+            async with session.begin():
+                token = await session.scalar(select(Token).where(Token.mint == mint))
+                if token is not None and token.heavy_scan_status in {
+                    HEAVY_SCAN_COMPLETE,
+                    HEAVY_SCAN_FAILED,
+                }:
+                    logger.info(
+                        "risk_heavy_already_finished",
+                        mint=mint,
+                        heavy_scan_status=token.heavy_scan_status,
+                    )
+                    return
+                prior = token.funder_graph_status if token is not None else None
+                if prior == FUNDER_GRAPH_FAILED:
+                    await self._store_heavy_failure(session, token)
+                    return
                 if prior == FUNDER_GRAPH_SKIPPED:
-                    # Bonding-curve holders were not verified. The curve PDA is
-                    # not a Raydium LP, so a graph walk would treat it as a wallet.
                     clusters: list[FunderCluster] = []
                     logger.info(
                         "funder_graph_skipped",
@@ -192,11 +353,7 @@ class RiskScanWorker:
                         reason=FUNDER_GRAPH_SKIPPED,
                     )
                 else:
-                    # build_graph_for_token calls getTokenLargestAccounts now.
-                    # Post-migration scans must not reuse a pre-migration list.
-                    clusters = list(
-                        await self._funder_factory(session).build_graph_for_token(mint)
-                    )
+                    clusters = list(await self._funder_factory(session).build_graph_for_token(mint))
                     token = await session.scalar(select(Token).where(Token.mint == mint))
                     if token is not None and prior == FUNDER_GRAPH_PENDING_POST:
                         token.funder_graph_status = FUNDER_GRAPH_COMPLETED_POST
@@ -209,23 +366,26 @@ class RiskScanWorker:
                 scanner = self._scanner_factory(session, list(clusters))
                 if prior == FUNDER_GRAPH_SKIPPED:
                     mark_funder_graph_unbuilt(scanner)
-                report = await scanner.scan_token(mint)
+                report = await scanner.scan_heavy(mint)
                 if token is None:
                     token = Token(mint=mint, first_seen_at=report.scanned_at)
                     session.add(token)
-                if report.liquidity_usd is not None:
-                    token.liquidity_usd = report.liquidity_usd
-                token.risk_score = Decimal(report.risk_score)
-                token.risk_flags = _risk_flags(report)
-                token.mint_authority_renounced = _passed(report, "check_mint_authority")
-                token.freeze_authority_renounced = _passed(report, "check_freeze_authority")
+                    await session.flush()
+                flags = _flags_after_heavy(token.risk_flags, report)
+                token.risk_flags = flags
+                token.risk_score = Decimal(score_from_flags(flags))
+                token.heavy_scan_status = HEAVY_SCAN_COMPLETE
+                # Freshness for fusion is this write, not the fast ack. A mint
+                # that waited in risk_heavy_queue is inside the 5-minute window
+                # once risk_score and updated_at land together.
                 token.updated_at = report.scanned_at
                 token.trace_id = trace_id
                 logger.info(
-                    "risk_scan_stored",
+                    "risk_heavy_stored",
                     mint=mint,
-                    risk_score=report.risk_score,
+                    risk_score=str(token.risk_score),
                     risk_flags=token.risk_flags,
+                    heavy_scan_status=HEAVY_SCAN_COMPLETE,
                 )
                 builder = self._funder_factory(session)
                 dev_root = None
@@ -237,22 +397,6 @@ class RiskScanWorker:
                     getattr(scanner, "holder_book", None),
                     dev_root=dev_root,
                 )
-                seen_at = report.scanned_at
-                await record_listing(
-                    session,
-                    self._redis,
-                    token,
-                    pool_status=report.pool_status,
-                    price_usd=report.price_usd,
-                    seen_at=seen_at,
-                )
-                lp_book = getattr(scanner, "lp_book", None)
-                rows = [] if lp_book is None else [
-                    LpCustody(row.is_burn_address, row.is_lock_program, row.amount_raw)
-                    for row in lp_book.rows
-                ]
-                await record_lp_unlock(session, token, classify_lp_custody(rows))
-        return report
 
     async def _handle_lookup_failure(
         self,
@@ -281,8 +425,8 @@ class RiskScanWorker:
                     message_id=message_id,
                 )
                 return
-        await self._mark_failed_permanently(mint)
-        await self._redis.xack(RISK_SCAN_QUEUE, RISK_SCAN_GROUP, message_id)
+        await self._close_heavy_as_failed(mint)
+        await self._redis.xack(RISK_HEAVY_QUEUE, RISK_HEAVY_GROUP, message_id)
         logger.warning(
             "funder_lookup_failed_permanently",
             mint=mint,
@@ -320,15 +464,32 @@ class RiskScanWorker:
             return False
         return deadline > time.time()
 
-    async def _mark_failed_permanently(self, mint: str) -> None:
+    async def _close_heavy_as_failed(self, mint: str) -> None:
+        """Score the checks that already resolved. Leave the heavy flags unavailable."""
         async with self._sessions() as session:
             async with session.begin():
                 token = await session.scalar(select(Token).where(Token.mint == mint))
                 if token is None:
                     return
-                if token.funder_graph_status in _PROTECTED_FUNDER_STATUSES:
-                    return
-                token.funder_graph_status = FUNDER_GRAPH_FAILED
+                await self._store_heavy_failure(session, token)
+
+    async def _store_heavy_failure(self, session: AsyncSession, token: Token) -> None:
+        if token.funder_graph_status not in _PROTECTED_FUNDER_STATUSES:
+            token.funder_graph_status = FUNDER_GRAPH_FAILED
+        flags = _ensure_heavy_unavailable(
+            [str(flag) for flag in token.risk_flags] if isinstance(token.risk_flags, list) else []
+        )
+        token.risk_flags = flags
+        token.risk_score = Decimal(score_from_flags(flags))
+        token.heavy_scan_status = HEAVY_SCAN_FAILED
+        token.updated_at = datetime.now(timezone.utc)
+        logger.warning(
+            "risk_heavy_stored",
+            mint=token.mint,
+            risk_score=str(token.risk_score),
+            risk_flags=flags,
+            heavy_scan_status=HEAVY_SCAN_FAILED,
+        )
 
     async def _ensure_group(self) -> None:
         if self._group_ready:
@@ -345,18 +506,42 @@ class RiskScanWorker:
                 raise
         self._group_ready = True
 
-    async def _read(self, stream_id: str, *, block_ms: int | None) -> list[tuple[str, dict[str, str]]]:
+    async def _ensure_heavy_group(self) -> None:
+        if self._heavy_group_ready:
+            return
+        try:
+            await self._redis.xgroup_create(
+                RISK_HEAVY_QUEUE,
+                RISK_HEAVY_GROUP,
+                id="0",
+                mkstream=True,
+            )
+        except ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+        self._heavy_group_ready = True
+
+    async def _read(
+        self,
+        queue: str,
+        group: str,
+        stream_id: str,
+        *,
+        block_ms: int | None,
+    ) -> list[tuple[str, dict[str, str]]]:
         rows = await self._redis.xreadgroup(
-            groupname=RISK_SCAN_GROUP,
+            groupname=group,
             consumername=self._consumer,
-            streams={RISK_SCAN_QUEUE: stream_id},
+            streams={queue: stream_id},
             count=20,
             block=block_ms,
         )
         messages: list[tuple[str, dict[str, str]]] = []
         for _stream, entries in rows or []:
             for message_id, fields in entries:
-                messages.append((str(message_id), {str(key): str(value) for key, value in fields.items()}))
+                messages.append(
+                    (str(message_id), {str(key): str(value) for key, value in fields.items()})
+                )
         return messages
 
     def _stopping(self) -> bool:
@@ -378,3 +563,36 @@ def _risk_flags(report: RiskReport) -> list[str]:
         elif check.passed is None:
             flags.append(f"{check.name}:unavailable")
     return flags
+
+
+def _fast_flags(report: RiskReport) -> list[str]:
+    flags = [flag for flag in _risk_flags(report) if flag.split(":", 1)[0] in FAST_CHECKS]
+    flags.extend(f"{name}:unavailable" for name in HEAVY_CHECKS)
+    return flags
+
+
+def _flags_after_heavy(stored: object, heavy: RiskReport) -> list[str]:
+    kept: list[str] = []
+    if isinstance(stored, list):
+        for flag in stored:
+            text = str(flag)
+            if text.split(":", 1)[0] in FAST_CHECKS:
+                kept.append(text)
+    present = {check.name for check in heavy.checks}
+    kept.extend(_risk_flags(heavy))
+    for name in HEAVY_CHECKS:
+        if name not in present:
+            kept.append(f"{name}:unavailable")
+    return kept
+
+
+def _ensure_heavy_unavailable(flags: list[str]) -> list[str]:
+    kept = [flag for flag in flags if flag.split(":", 1)[0] not in HEAVY_CHECKS]
+    kept.extend(f"{name}:unavailable" for name in HEAVY_CHECKS)
+    return kept
+
+
+def score_from_flags(flags: list[str]) -> int:
+    """Sum weights of checks that are not failed and not unavailable."""
+    blocked = {flag.split(":", 1)[0] for flag in flags}
+    return sum(weight for name, weight in RISK_CHECK_WEIGHTS.items() if name not in blocked)

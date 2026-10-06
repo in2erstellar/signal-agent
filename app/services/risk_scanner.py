@@ -93,6 +93,21 @@ class RiskScanner:
         self.lp_book: LpBook | None = None
 
     async def scan_token(self, mint: str) -> RiskReport:
+        """All five checks. Callers that split the queue use the two halves below."""
+        fast = await self.scan_fast(mint)
+        heavy = await self.scan_heavy(mint)
+        checks = [*fast.checks, *heavy.checks]
+        report = self._report(mint, checks)
+        logger.info(
+            "risk_scan_finished",
+            mint=mint,
+            risk_score=report.risk_score,
+            unavailable=[check.name for check in checks if check.passed is None],
+        )
+        return report
+
+    async def scan_fast(self, mint: str) -> RiskReport:
+        """Mint, freeze, and LP lock. The LP mint's largest-accounts read stays here."""
         self._liquidity_usd = None
         self._pool_status = "lookup_failed"
         self._price_usd = None
@@ -102,6 +117,12 @@ class RiskScanner:
             await self._run("check_mint_authority", self._check_mint_authority, mint),
             await self._run("check_freeze_authority", self._check_freeze_authority, mint),
             await self._run("check_lp_lock", self._check_lp_lock, mint),
+        ]
+        return self._report(mint, checks)
+
+    async def scan_heavy(self, mint: str) -> RiskReport:
+        """Holder concentration and funder exposure. Does not clear the LP reading."""
+        checks = [
             await self._run(
                 "check_holder_concentration",
                 self._check_holder_concentration,
@@ -113,7 +134,10 @@ class RiskScanner:
                 mint,
             ),
         ]
-        report = RiskReport(
+        return self._report(mint, checks)
+
+    def _report(self, mint: str, checks: list[CheckResult]) -> RiskReport:
+        return RiskReport(
             mint=mint,
             risk_score=composite_risk_score(checks),
             checks=checks,
@@ -122,13 +146,6 @@ class RiskScanner:
             pool_status=self._pool_status,
             price_usd=self._price_usd,
         )
-        logger.info(
-            "risk_scan_finished",
-            mint=mint,
-            risk_score=report.risk_score,
-            unavailable=[check.name for check in checks if check.passed is None],
-        )
-        return report
 
     async def _run(
         self,

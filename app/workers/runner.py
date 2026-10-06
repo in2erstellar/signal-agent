@@ -217,6 +217,9 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     async def risk_loop() -> None:
         await resilient_loop(stop, lambda: risk.run_once(block_ms=5000), name="risk_scan")
 
+    async def risk_heavy_loop() -> None:
+        await resilient_loop(stop, lambda: risk.run_heavy_once(block_ms=5000), name="risk_heavy")
+
     async def discovery_loop() -> None:
         async for event in portal.iter_events(stop):
             try:
@@ -281,6 +284,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         await run_until_stopped(
             stop,
             risk_loop,
+            risk_heavy_loop,
             discovery_loop,
             lambda: poll_loop(stop, review_once, DISCOVERY_REVIEW_INTERVAL_SECONDS),
             lambda: poll_loop(stop, bait.run_once, BAIT_POLL_INTERVAL_SECONDS),

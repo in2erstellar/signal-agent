@@ -30,6 +30,7 @@ flowchart LR
   Helius -->|POST /webhooks/helius| API
   API -->|wallet_txs, tokens| PG
   API -->|risk_scan_queue stream| Redis
+  Risk -->|risk_heavy_queue stream| Redis
   API -->|bait_check_queue sorted set| Redis
   Worker --> Risk
   Worker --> Bait
@@ -156,7 +157,7 @@ Worker читает `.env` один раз при старте. Новый `HELI
 
 - `POST /webhooks/helius` — приём Helius, без `X-API-Key`.
 - `GET /health` — Postgres и Redis.
-- `GET /metrics` — Prometheus: обработанные webhook, отправленные алерты, латентность risk scan, размер `risk_scan_queue` и `bait_check_queue`.
+- `GET /metrics` — Prometheus: обработанные webhook, отправленные алерты, латентность быстрого risk scan, размер `risk_scan_queue`, `risk_heavy_queue` и `bait_check_queue`.
 - `/docs` — публичное API: watchlist, сигналы, риск токена, настройки пользователя. Заголовок `X-API-Key`.
 
 ## Проверки

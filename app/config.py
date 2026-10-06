@@ -184,8 +184,11 @@ if BAIT_RECHECK_DELAY_MINUTES < BAIT_SELL_WINDOW_END_MINUTES:
 # Redis names for the pipeline. Bait jobs are delayed, so they live in a
 # sorted set scored by scheduled_at. Risk scans are immediate, so they use a stream.
 RISK_SCAN_QUEUE = "risk_scan_queue"
+# Holder concentration and the funder walk. Acked separately from RISK_SCAN_QUEUE.
+RISK_HEAVY_QUEUE = "risk_heavy_queue"
 BAIT_CHECK_QUEUE = "bait_check_queue"
 RISK_SCAN_GROUP = "risk_scan_workers"
+RISK_HEAVY_GROUP = "risk_heavy_workers"
 
 BAIT_POLL_INTERVAL_SECONDS = 60
 SIGNAL_FUSION_INTERVAL_SECONDS = 30

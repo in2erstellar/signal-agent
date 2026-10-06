@@ -117,6 +117,8 @@ async def test_webhook_risk_scan_signal_and_bait_check(pipeline_infra: object) -
         risk = RiskScanWorker(sessions, redis, funder_factory, scanner_factory)
         processed, failed = await risk.run_once()
         assert (processed, failed) == (1, 0)
+        heavy_processed, heavy_failed = await risk.run_heavy_once()
+        assert (heavy_processed, heavy_failed) == (1, 0)
 
         async with sessions() as session:
             async with session.begin():
