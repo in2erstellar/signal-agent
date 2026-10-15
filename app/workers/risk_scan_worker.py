@@ -31,7 +31,7 @@ from app.config import (
     RISK_SCAN_PRIORITY_QUEUE,
     RISK_SCAN_QUEUE,
 )
-from app.db.models import FunderCluster, Token
+from app.db.models import FunderCluster, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace, new_trace_id, record_risk_scan_latency
 from app.services.creator_cluster import measure_distribution
 from app.services.funder_graph import FunderLookupFailure
@@ -47,9 +47,14 @@ from app.services.token_store import (
     HEAVY_SCAN_COMPLETE,
     HEAVY_SCAN_FAILED,
     HEAVY_SCAN_PENDING,
+    HEAVY_SCAN_SKIPPED,
 )
+from app.workers.signal_fusion import composite_score, composite_without_wallet, emits_signal
 
 logger = structlog.get_logger(__name__)
+
+# Best wallet score fusion can compute: every tracked buyer at a 100% win rate.
+_BEST_WALLET_SCORE = Decimal(100)
 
 _RETRY_KEY_TTL_SECONDS = 3600
 _PROTECTED_FUNDER_STATUSES = frozenset(
@@ -386,8 +391,9 @@ class RiskScanWorker:
     async def _scan(self, mint: str, trace_id: str) -> bool:
         """Write the fast checks and return whether a heavy message is required.
 
-        ``False`` means the funder walk already failed for good. The caller
-        acks without enqueueing. Distribution columns are not written here.
+        ``False`` means the funder walk already failed for good, or the fast
+        checks make a signal impossible (``heavy_scan_status = skipped``). The
+        caller acks without enqueueing. Distribution columns are not written here.
         """
         async with self._sessions() as session:
             async with session.begin():
@@ -440,6 +446,15 @@ class RiskScanWorker:
                     ]
                 )
                 await record_lp_unlock(session, token, classify_lp_custody(rows))
+                await session.flush()
+                reason = heavy_skip_reason(
+                    list(token.risk_flags),
+                    wallet_history=await _has_wallet_history(session, token),
+                )
+                if reason is not None:
+                    token.heavy_scan_status = HEAVY_SCAN_SKIPPED
+                    logger.info("risk_heavy_skipped", mint=mint, reason=reason)
+                    return False
         return True
 
     async def _scan_heavy(self, mint: str, trace_id: str) -> None:
@@ -720,6 +735,47 @@ def _ensure_heavy_unavailable(flags: list[str]) -> list[str]:
     kept = [flag for flag in flags if flag.split(":", 1)[0] not in HEAVY_CHECKS]
     kept.extend(f"{name}:unavailable" for name in HEAVY_CHECKS)
     return kept
+
+
+async def _has_wallet_history(session: AsyncSession, token: Token) -> bool:
+    """Same rule as fusion: a tracked buyer of this mint with a known win rate."""
+    found = await session.scalar(
+        select(TrackedWallet.id)
+        .join(WalletTx, WalletTx.wallet_id == TrackedWallet.id)
+        .where(
+            WalletTx.token_id == token.id,
+            WalletTx.action == "buy",
+            TrackedWallet.win_rate.is_not(None),
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
+def heavy_skip_reason(fast_flags: list[str], *, wallet_history: bool) -> str | None:
+    """Why the heavy half cannot lead to a signal, or None when it still can.
+
+    Fusion drops a mint with any unavailable check, so an unavailable fast
+    check ends it here. Otherwise every heavy check is assumed to pass and the
+    bait penalty to be zero, the best case fusion could see; if even that
+    composite does not clear the threshold, the walk would only spend credits.
+    """
+    unavailable = sorted(
+        flag.split(":", 1)[0]
+        for flag in fast_flags
+        if flag.endswith(":unavailable") and flag.split(":", 1)[0] in FAST_CHECKS
+    )
+    if unavailable:
+        return f"fast_check_unavailable:{','.join(unavailable)}"
+    failed = {flag for flag in fast_flags if flag in FAST_CHECKS}
+    best_risk = Decimal(sum(w for name, w in RISK_CHECK_WEIGHTS.items() if name not in failed))
+    if wallet_history:
+        best = composite_score(best_risk, _BEST_WALLET_SCORE, Decimal(0))
+    else:
+        best = composite_without_wallet(best_risk, Decimal(0))
+    if emits_signal(best):
+        return None
+    return f"threshold_unreachable:best_composite={best}"
 
 
 def score_from_flags(flags: list[str]) -> int:

@@ -115,7 +115,7 @@ class Token(Base):
         ),
         CheckConstraint(
             "heavy_scan_status IS NULL OR heavy_scan_status IN "
-            "('pending', 'complete', 'failed')",
+            "('pending', 'complete', 'failed', 'skipped')",
             name="heavy_scan_status_values",
         ),
         Index("ix_tokens_creator_address", "creator_address"),

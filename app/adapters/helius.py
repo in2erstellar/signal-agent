@@ -45,6 +45,7 @@ _LAMPORTS_PER_SOL = Decimal(1_000_000_000)
 _RETRYABLE_STATUS = frozenset({408, 500, 502, 503, 504})
 
 Sleep = Callable[[float], Awaitable[None]]
+Budget = Callable[[], Awaitable[bool]]
 
 
 class HeliusError(Exception):
@@ -53,6 +54,10 @@ class HeliusError(Exception):
 
 class HeliusRateLimitError(HeliusError):
     """HTTP 429 persisted for every attempt."""
+
+
+class HeliusBudgetExceeded(HeliusError):
+    """The day's request budget is spent. Nothing was sent."""
 
 
 class HeliusResponseError(HeliusError):
@@ -138,6 +143,7 @@ class HeliusClient:
         max_funding_signatures: int = MAX_FUNDING_LOOKUP_SIGNATURES,
         max_funding_transactions: int = MAX_FUNDING_TRANSACTION_INSPECT,
         max_requests_per_second: float | None = None,
+        budget: Budget | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("HELIUS_API_KEY is empty")
@@ -175,6 +181,9 @@ class HeliusClient:
             None if max_requests_per_second is None else 1.0 / max_requests_per_second
         )
         self._next_send_at = 0.0
+        # None sends without counting. Otherwise every send, retries included,
+        # must reserve one request first.
+        self._budget = budget
 
     @classmethod
     def from_settings(cls, settings: Settings, **kwargs: Any) -> HeliusClient:
@@ -489,6 +498,11 @@ class HeliusClient:
                     transport_error: BaseException | None = None
                 else:
                     deferred = False
+                    if self._budget is not None and not await self._budget():
+                        logger.warning("helius_budget_exhausted", rpc_method=rpc_method)
+                        raise HeliusBudgetExceeded(
+                            f"Helius daily request budget is spent; {rpc_method or method} not sent"
+                        )
                     await self._pace()
                     try:
                         response = await self._client.request(

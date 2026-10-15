@@ -21,6 +21,7 @@ from app.config import (
     DISCOVERY_REVIEW_INTERVAL_SECONDS,
     FAST_SCAN_CONCURRENCY,
     FUNDER_GRAPH_CONCURRENCY,
+    HELIUS_DAILY_REQUEST_BUDGET,
     OUTCOME_POLL_INTERVAL_SECONDS,
     SIGNAL_FUSION_INTERVAL_SECONDS,
     get_settings,
@@ -107,6 +108,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     from app.adapters.raydium import RaydiumPools
     from app.adapters.token_security import HeliusTokenSecurity
     from app.services.funder_graph import FunderGraphBuilder
+    from app.services.helius_budget import daily_budget
     from app.services.risk_scanner import RiskScanner
     from app.services.startup_checks import assert_worker_ready
     from app.workers.ai_review_worker import AiReviewWorker
@@ -128,7 +130,10 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         socket_timeout=20,
         decode_responses=True,
     )
-    helius = HeliusClient.from_settings(settings)
+    helius = HeliusClient.from_settings(
+        settings,
+        budget=daily_budget(redis, daily_limit=HELIUS_DAILY_REQUEST_BUDGET),
+    )
     raydium = RaydiumPools(settings.raydium_api_base_url)
     facts = HeliusTokenSecurity(helius, raydium, PumpSwapPools(helius))
     stop = stop or asyncio.Event()

@@ -28,6 +28,8 @@ FUNDER_GRAPH_FAILED = "failed_permanently"
 HEAVY_SCAN_PENDING = "pending"
 HEAVY_SCAN_COMPLETE = "complete"
 HEAVY_SCAN_FAILED = "failed"
+# Fast checks already make the signal threshold unreachable; no heavy message.
+HEAVY_SCAN_SKIPPED = "skipped"
 AI_REVIEW_PENDING = "pending"
 AI_REVIEW_COMPLETED = "completed"
 AI_REVIEW_FAILED = "failed"

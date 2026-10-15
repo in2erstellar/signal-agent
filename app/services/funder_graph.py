@@ -122,6 +122,25 @@ def holder_list_failure(mint: str, exc: Exception) -> FunderLookupFailure | None
     return failure
 
 
+def established_wallet(address: str) -> FundingInfo:
+    """Self-edge for a wallet whose history is longer than the lookup reads.
+
+    Launch-day sybil wallets are fresh and short. A wallet past one page of
+    signatures is an established trader or a service wallet, so it is stored
+    as its own root: ``wallet_funders`` gets ``wallet == funder`` with no
+    signature. Clustering skips self-funded holders, and the creator share
+    only matches it when that wallet is the creator's root itself.
+    """
+    return FundingInfo(
+        wallet_address=address,
+        funder=address,
+        amount_sol=Decimal(0),
+        signature="",
+        funded_at=datetime.now(timezone.utc),
+        slot=None,
+    )
+
+
 class FundingLookup(Protocol):
     """Что билдеру нужно от Helius. Живой клиент и тестовый двойник оба это закрывают."""
 
@@ -307,11 +326,12 @@ class FunderGraphBuilder:
         try:
             direct = await self._load_cached_funding(address)
             if direct is None:
-                direct = await self._helius.find_first_funding_tx(address)
+                direct = await self._lookup_or_established(address)
                 if direct is None:
                     logger.warning("creator_funder_unavailable", wallet=address, reason="no_funder")
                     return None
-                await self._insert_edge(address, direct, hop_depth=1)
+                if direct.funder != address:
+                    await self._insert_edge(address, direct, hop_depth=1)
         except Exception as exc:
             failure = funder_lookup_failure(address, exc)
             if failure is None:
@@ -322,11 +342,13 @@ class FunderGraphBuilder:
                 reason=str(failure),
             )
             return None
+        if direct.funder == address:
+            return address
         parent = await self._load_cached_funding(direct.funder)
         if parent is not None:
             return parent.funder
         try:
-            parent_info = await self._helius.find_first_funding_tx(direct.funder)
+            parent_info = await self._lookup_or_established(direct.funder)
         except Exception as exc:
             failure = funder_lookup_failure(direct.funder, exc)
             if failure is None:
@@ -379,7 +401,7 @@ class FunderGraphBuilder:
                     logger.info("funding_lookup_cache_hit", wallet=address, funder=cached.funder)
                 else:
                     try:
-                        funding_cache[address] = await self._helius.find_first_funding_tx(address)
+                        funding_cache[address] = await self._lookup_or_established(address)
                     except Exception as exc:
                         failure = funder_lookup_failure(address, exc)
                         if failure is None:
@@ -415,6 +437,20 @@ class FunderGraphBuilder:
             clusters=len(stored),
         )
         return stored
+
+    async def _lookup_or_established(self, address: str) -> FundingInfo | None:
+        """First funding, or a stored self-edge when the history is too long to read."""
+        try:
+            return await self._helius.find_first_funding_tx(address)
+        except FundingDepthExceeded as exc:
+            info = established_wallet(address)
+            await self._insert_edge(address, info, hop_depth=1)
+            logger.info(
+                "funding_lookup_established_wallet",
+                wallet=address,
+                signatures_scanned=exc.scanned,
+            )
+            return info
 
     async def _token_for_mint(self, mint: str) -> Token:
         token = (

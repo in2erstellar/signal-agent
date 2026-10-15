@@ -290,6 +290,11 @@ FAST_SCAN_CONCURRENCY = 8
 # 10 RPS on standard RPC (https://www.helius.dev/docs/billing/rate-limits,
 # 2026-10-15); a measured run without pacing peaked at 11/s and drew 429s.
 HELIUS_MAX_REQUESTS_PER_SECOND = 8.0
+# Sends per UTC day before the worker's client stops calling Helius. The free
+# plan has 1M credits a month (https://www.helius.dev/pricing, 2026-10-15),
+# about 33_000 a day; the standard RPC methods used here cost 1 credit each.
+# 30_000 keeps a margin for the API process and retries.
+HELIUS_DAILY_REQUEST_BUDGET = 30_000
 # Same wallet and the same transient funded-by error. A 403 does not use this
 # counter: the free plan forbids that call, so the lookup is permanent at once.
 MAX_FUNDER_LOOKUP_RETRIES = 2
@@ -298,13 +303,14 @@ MAX_FUNDER_LOOKUP_RETRIES = 2
 # Switch the constant to go back to the paid call. Do not delete that client method.
 FUNDER_LOOKUP_METHOD = "rpc"
 # Newest-first pages of 1000. Stop after this many signatures. Hitting the cap
-# means the oldest funding transfer was not reached, which is not "no funder".
-# Holder wallets from the funded-by 403 sample needed 6k-30k signatures.
+# means the oldest funding transfer was not reached; funder_graph then stores
+# the wallet as established (its own root) instead of failing the token.
 # https://www.helius.dev/docs/billing/credits (2026-09-25): each of
 # getSignaturesForAddress and getTransaction is 1 credit. A history under
-# 1000 signatures is 2 credits. Paging to this cap is 40 signature calls
-# + 1 getTransaction = 41 credits. funded-by on that page is 100 credits.
-MAX_FUNDING_LOOKUP_SIGNATURES = 40000
+# 1000 signatures is 2 credits. The old 40_000 cap paged up to 41 credits per
+# wallet; a measured run spent two thirds of all requests on these pages.
+# Launch-day sybil wallets are short, so one page decides the useful cases.
+MAX_FUNDING_LOOKUP_SIGNATURES = 1000
 # The oldest signature sometimes lists the wallet with no SOL change.
 # Walk this many oldest transactions, oldest first, until the balance rises.
 MAX_FUNDING_TRANSACTION_INSPECT = 25
