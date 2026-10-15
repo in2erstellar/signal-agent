@@ -47,7 +47,7 @@ async def test_start_registers_a_user_and_is_idempotent(sessions: object) -> Non
 
     text_out = update.message.reply_text.await_args_list[0].args[0]
     assert text_out == user_welcome_text()
-    assert "Settings" in text_out
+    assert "/settings" in text_out
     assert "/watch" not in text_out
     async with sessions() as session:  # type: ignore[operator]
         rows = list(await session.scalars(select(User)))

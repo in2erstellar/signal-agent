@@ -6,6 +6,8 @@ Helius is a scripted double. The databases are not.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -29,7 +31,7 @@ from tests.test_wallet_watcher import MINT, SECRET, T0, WALLET, helius_buy
 
 pytest_plugins = ["tests.pipeline_containers"]
 
-LOG_PATH = "/tmp/signalforge_pipeline_cycle.log"
+LOG_PATH = os.path.join(tempfile.gettempdir(), "signalforge_pipeline_cycle.log")
 ROOT_FUNDER = "RootFunder11111111111111111111111111111111"
 HOLDERS = [WALLET, "HolderA", "HolderB", "HolderC", "HolderD", "HolderE"]
 
