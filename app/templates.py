@@ -39,8 +39,12 @@ DISCLAIMER = FOOTER_DISCLAIMER
 BAIT_WARNING = f"{ICON_BAIT_WARNING} Copy-trade bait pattern detected"
 STORED_SCAN_NOTE = (
     "This is the stored scan, not a new network request. "
-    "A high risk_score means the known checks passed, and does not mean the token is safe."
+    "Checks passed is out of 100: higher means more known checks passed. "
+    "It does not mean the token is safe."
 )
+# risk_score is the sum of weights of passed checks, so higher is better. The
+# old "risk_score" label read as "more risk" to users and to the AI review.
+CHECKS_PASSED_LABEL = "Checks passed"
 
 
 def welcome_text() -> str:
@@ -245,8 +249,8 @@ def alert_text(
         solscan_token(mint),
         "",
         ICON_SECTION,
-        f"<b>{_code(format_score(composite_score))}</b>",
-        f"risk_score: {_code(risk)}",
+        f"Signal score: <b>{_code(format_score(composite_score))}</b>",
+        f"{CHECKS_PASSED_LABEL}: {_code(risk)}/100",
         *_flag_block("risk_flags", other_flags, lp_flags),
     ]
     if bait_warning:
@@ -298,7 +302,7 @@ def risk_card_text(
         lines.append(_code(when))
     lines.extend(
         [
-            f"risk_score: {_code(risk)}",
+            f"{CHECKS_PASSED_LABEL}: {_code(risk)}/100",
             *_flag_block("flags", other_flags, lp_flags),
             STORED_SCAN_NOTE,
         ]

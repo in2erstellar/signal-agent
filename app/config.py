@@ -216,6 +216,10 @@ SIGNAL_RISK_WEIGHT = Decimal("0.5")
 SIGNAL_WALLET_WEIGHT = Decimal("0.3")
 SIGNAL_BAIT_WEIGHT = Decimal("0.2")
 SIGNAL_THRESHOLD = Decimal("50")
+# A measured share of supply on the creator's funder root above this blocks
+# the signal. The per-user max_dev_cluster_share only adds a warning line; a
+# live signal went out green with 79% on the creator's root.
+SIGNAL_MAX_CREATOR_SHARE = Decimal("0.30")
 
 # Alert fan-out. min_score is a floor on composite_score.
 # max_risk is a ceiling on (100 - risk_score): a higher value admits more tokens.

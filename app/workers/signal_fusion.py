@@ -31,6 +31,7 @@ from app.adapters.ai_review import TokenReviewInput, estimate_review_tokens
 from app.config import (
     AI_REVIEW_QUEUE,
     SIGNAL_BAIT_WEIGHT,
+    SIGNAL_MAX_CREATOR_SHARE,
     SIGNAL_RISK_SCAN_MAX_AGE_MINUTES,
     SIGNAL_RISK_WEIGHT,
     SIGNAL_THRESHOLD,
@@ -39,7 +40,7 @@ from app.config import (
 from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace
 from app.services.ai_budget import release_review, reserve_review, review_counts, tokens_used
-from app.services.creator_cluster import load_creator_context
+from app.services.creator_cluster import load_creator_context, share_above_limit
 from app.services.risk_scanner import unavailable_fields
 from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING, AI_REVIEW_TRUNCATED
 
@@ -274,6 +275,15 @@ class SignalFusion:
                     mint=token.mint,
                     flag="creator_cluster_data_quality:degraded",
                     reason=f"degraded: {degraded}",
+                )
+            return False
+        if share_above_limit(context, SIGNAL_MAX_CREATOR_SHARE):
+            with bind_trace(token.trace_id):
+                logger.info(
+                    "creator_share_above_signal_limit",
+                    mint=token.mint,
+                    share=context.get("distribution_share") if context else None,
+                    limit=str(SIGNAL_MAX_CREATOR_SHARE),
                 )
             return False
         inserted_id = await session.scalar(

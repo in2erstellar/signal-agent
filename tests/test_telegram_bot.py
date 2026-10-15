@@ -305,7 +305,7 @@ async def test_signals_and_stored_risk_are_readable(sessions: object) -> None:
     context.args = [mint]
     await cmd_risk(risk, context)
     body = risk.message.reply_text.await_args.args[0]
-    assert "risk_score: <code>80</code>" in body
+    assert "Checks passed: <code>80</code>/100" in body
     assert "check_lp_lock" in body
     assert "does not mean the token is safe" in body
     async with sessions() as session:  # type: ignore[operator]
@@ -346,7 +346,7 @@ async def test_alert_text_shows_the_score_the_mint_link_and_the_bait_warning() -
     assert f"https://solscan.io/token/{mint}" in text
     assert f"<code>{mint}</code>" in text
     assert ">Solscan</a>" in text
-    assert "risk_score: <code>85</code>" in text
+    assert "Checks passed: <code>85</code>/100" in text
     assert "check_funder_cluster_exposure" in text
     assert f"<b>{BAIT_WARNING}</b>" in text
     assert text.endswith(DISCLAIMER)
@@ -397,7 +397,7 @@ def test_alert_card_groups_ready_data_without_rewriting_reasons() -> None:
     assert "⚠️ Creator-funder supply is above your limit." in text
     assert "LP stayed locked, since tracking started: <code>2 of 3</code>" in text
     assert "🔒 LP locked" not in text
-    assert text.index("risk_score:") < text.index("Creator cluster") < text.index("<b>LP</b>")
+    assert text.index("Checks passed:") < text.index("Creator cluster") < text.index("<b>LP</b>")
     help_body = help_text()
     assert "⚪ <b>unavailable (no pool yet)</b>" in help_body
     assert "⚙️ /settings" in help_body

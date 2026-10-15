@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from structlog.testing import capture_logs
 
-from app.config import SIGNAL_THRESHOLD
+from app.config import SIGNAL_MAX_CREATOR_SHARE, SIGNAL_THRESHOLD
 from app.db.models import OutcomeCheck, Signal, Token
 from app.services.creator_cluster import MEDIAN_SELL_REASON
 from app.workers.signal_fusion import (
@@ -343,3 +343,25 @@ async def test_price_lookup_failed_on_earlier_launches_still_creates_a_signal(
     finally:
         await truncate_pipeline(engine)
         await engine.dispose()
+
+
+async def test_creator_share_above_the_signal_limit_blocks_the_signal(
+    pipeline_infra: object,
+) -> None:
+    # The live case: 79% of supply on the creator's funder root went out green.
+    logs, row = await _fuse_one(
+        pipeline_infra,
+        _passing_token("mint-creator-heavy", dev_distribution_share=Decimal("0.79")),
+    )
+    assert row is None
+    blocked = [e for e in logs if e.get("event") == "creator_share_above_signal_limit"]
+    assert len(blocked) == 1
+    assert blocked[0]["limit"] == str(SIGNAL_MAX_CREATOR_SHARE)
+
+
+async def test_creator_share_at_the_signal_limit_still_signals(pipeline_infra: object) -> None:
+    _logs, row = await _fuse_one(
+        pipeline_infra,
+        _passing_token("mint-creator-at-limit", dev_distribution_share=SIGNAL_MAX_CREATOR_SHARE),
+    )
+    assert row is not None

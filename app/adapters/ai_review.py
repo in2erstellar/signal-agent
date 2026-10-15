@@ -288,11 +288,16 @@ def _user_prompt(token: TokenReviewInput) -> str:
             f"mint: {token.mint}",
             f"symbol: {token.symbol or 'unknown'}",
             f"name: {token.name or 'unknown'}",
-            f"risk_score: {token.risk_score or 'unknown'}",
-            f"risk_flags: {flags}",
+            f"checks_passed_score: {token.risk_score or 'unknown'} out of 100",
+            f"failed_checks: {flags}",
             f"liquidity_usd: {token.liquidity_usd or 'unknown'}",
             f"composite_score: {token.composite_score or 'unknown'}",
-            "risk_score is a known-check score, not a claim the token is safe.",
+            # The stored column is named risk_score, but it is the weight of the
+            # checks that passed. A live review read 85 as "high risk".
+            "checks_passed_score is the weight of the known checks that passed: "
+            "100 means every check passed, and a lower value means a failed or "
+            "unknown check. Higher is better. It is not a claim the token is safe. "
+            "Describe each failed check by name.",
         ]
     )
 
