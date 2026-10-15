@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from app.adapters.helius import HeliusResponseError
+from app.adapters.pumpswap import PUMP_AMM_PROGRAM_ID
 from app.adapters.raydium import RaydiumError, RaydiumPools, _lp_mint
 from app.adapters.token_security import (
     INCINERATOR,
@@ -156,3 +157,31 @@ async def test_holder_book_marks_amm_vault_and_lp_book_marks_burn_and_lock() -> 
         ("LockAccount", False, True),
     ]
     await raydium.aclose()
+
+
+async def test_holder_book_marks_a_pumpswap_pool_vault() -> None:
+    # Live shape after a pump.fun migration: the pool PDA holds the supply and
+    # is owned by the PumpSwap program.
+    helius = QueueHelius(
+        [
+            {"value": _mint_account(mint_authority=None, freeze_authority=None, supply="1000")},
+            {"value": [{"address": "pool-vault", "amount": "990"}, {"address": "user-ata", "amount": "10"}]},
+            {
+                "value": [
+                    {"data": {"parsed": {"info": {"owner": "PumpPoolPda"}}}},
+                    {"data": {"parsed": {"info": {"owner": "HolderA"}}}},
+                ]
+            },
+            {"value": [{"owner": PUMP_AMM_PROGRAM_ID}, {"owner": "11111111111111111111111111111111"}]},
+        ]
+    )
+    raydium = RaydiumPools(
+        "https://api-v3.raydium.io",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(500))),
+    )
+    security = HeliusTokenSecurity(helius, raydium)  # type: ignore[arg-type]
+    book = await security.holder_book(MINT)
+    assert [(row.owner, row.is_lp_pool) for row in book.rows] == [
+        ("PumpPoolPda", True),
+        ("HolderA", False),
+    ]

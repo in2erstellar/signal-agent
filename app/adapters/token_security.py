@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.adapters.helius import HeliusClient, HeliusResponseError
-from app.adapters.pumpswap import PumpSwapPools
+from app.adapters.pumpswap import PUMP_AMM_PROGRAM_ID, PumpSwapPools
 from app.adapters.raydium import RaydiumPools
 
 # https://docs.raydium.io/reference/program-addresses (mainnet-beta).
@@ -35,7 +35,8 @@ RAYDIUM_LP_LOCK = "LockrWmn6K5twhz3y9w1dQERbmgSaRkfnTeTKbpofwE"
 # Widely used incinerator wallet. Sending LP here is the burn-address pattern.
 INCINERATOR = "1nc1nerator11111111111111111111111111111111"
 
-LP_POOL_PROGRAMS = frozenset({RAYDIUM_AMM_V4, RAYDIUM_CPMM, RAYDIUM_CLMM})
+# PumpSwap pool PDAs own their vaults; pump.fun migrations land there.
+LP_POOL_PROGRAMS = frozenset({RAYDIUM_AMM_V4, RAYDIUM_CPMM, RAYDIUM_CLMM, PUMP_AMM_PROGRAM_ID})
 LP_POOL_OWNERS = frozenset({RAYDIUM_AMM_V4_AUTHORITY})
 BURN_ADDRESSES = frozenset({INCINERATOR})
 LOCK_PROGRAMS = frozenset({RAYDIUM_LP_LOCK})
