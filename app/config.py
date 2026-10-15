@@ -286,6 +286,10 @@ FUNDER_GRAPH_CONCURRENCY = 3
 # call getTokenLargestAccounts. The Helius client still has one send lock and
 # one 429 pause, so this does not add a second in-flight HTTP request.
 FAST_SCAN_CONCURRENCY = 8
+# Requests per second the Helius client paces itself to. The free plan allows
+# 10 RPS on standard RPC (https://www.helius.dev/docs/billing/rate-limits,
+# 2026-10-15); a measured run without pacing peaked at 11/s and drew 429s.
+HELIUS_MAX_REQUESTS_PER_SECOND = 8.0
 # Same wallet and the same transient funded-by error. A 403 does not use this
 # counter: the free plan forbids that call, so the lookup is permanent at once.
 MAX_FUNDER_LOOKUP_RETRIES = 2

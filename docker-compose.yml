@@ -49,7 +49,7 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       AI_REVIEW_MODEL: ${AI_REVIEW_MODEL:-openai/gpt-oss-120b}
       ENVIRONMENT: dev
-      LOG_LEVEL: INFO
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,7 +89,7 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       AI_REVIEW_MODEL: ${AI_REVIEW_MODEL:-openai/gpt-oss-120b}
       ENVIRONMENT: dev
-      LOG_LEVEL: INFO
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy

@@ -27,6 +27,7 @@ import structlog
 
 from app.config import (
     FUNDER_LOOKUP_METHOD,
+    HELIUS_MAX_REQUESTS_PER_SECOND,
     MAX_FUNDING_LOOKUP_SIGNATURES,
     MAX_FUNDING_TRANSACTION_INSPECT,
     Settings,
@@ -136,9 +137,12 @@ class HeliusClient:
         signature_page_size: int = _SIGNATURE_PAGE_LIMIT,
         max_funding_signatures: int = MAX_FUNDING_LOOKUP_SIGNATURES,
         max_funding_transactions: int = MAX_FUNDING_TRANSACTION_INSPECT,
+        max_requests_per_second: float | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("HELIUS_API_KEY is empty")
+        if max_requests_per_second is not None and max_requests_per_second <= 0:
+            raise ValueError("max_requests_per_second must be positive")
         if funder_lookup_method not in {"rpc", "helius_funded_by"}:
             raise ValueError("funder_lookup_method must be rpc or helius_funded_by")
         if not 1 <= signature_page_size <= _SIGNATURE_PAGE_LIMIT:
@@ -165,6 +169,12 @@ class HeliusClient:
         self._pause_cv = asyncio.Condition()
         self._paused_until = 0.0
         self._now = time.monotonic
+        # None sends back to back. Otherwise each send waits this long after
+        # the previous one, under the send lock, so the rate stays below the plan.
+        self._min_send_interval = (
+            None if max_requests_per_second is None else 1.0 / max_requests_per_second
+        )
+        self._next_send_at = 0.0
 
     @classmethod
     def from_settings(cls, settings: Settings, **kwargs: Any) -> HeliusClient:
@@ -172,7 +182,7 @@ class HeliusClient:
             api_key=settings.helius_api_key.get_secret_value(),
             api_base_url=settings.helius_api_base_url,
             rpc_url=settings.helius_rpc_url,
-            **kwargs,
+            **{"max_requests_per_second": HELIUS_MAX_REQUESTS_PER_SECOND, **kwargs},
         )
 
     async def aclose(self) -> None:
@@ -467,6 +477,8 @@ class HeliusClient:
         scans one by one and each would send into the same limited window.
         """
         last_status: int | None = None
+        body = kwargs.get("json")
+        rpc_method = body.get("method") if isinstance(body, dict) else None
         attempt = 0
         while attempt < self._max_attempts:
             await self._wait_until_open()
@@ -477,6 +489,7 @@ class HeliusClient:
                     transport_error: BaseException | None = None
                 else:
                     deferred = False
+                    await self._pace()
                     try:
                         response = await self._client.request(
                             method,
@@ -494,6 +507,7 @@ class HeliusClient:
                             logger.warning(
                                 "helius_rate_limited",
                                 method=method,
+                                rpc_method=rpc_method,
                                 attempt=attempt + 1,
                                 retry_in_seconds=delay,
                             )
@@ -521,6 +535,12 @@ class HeliusClient:
                 continue
             assert response is not None
             last_status = response.status_code
+            logger.debug(
+                "helius_request",
+                rpc_method=rpc_method,
+                status_code=response.status_code,
+                attempt=attempt + 1,
+            )
             if response.status_code == 429:
                 if attempt + 1 >= self._max_attempts:
                     raise HeliusRateLimitError(
@@ -548,6 +568,18 @@ class HeliusClient:
             last_status or 0,
             f"Helius {method} failed with HTTP {last_status}",
         )
+
+    async def _pace(self) -> None:
+        """Hold the send until the minimum interval since the last send has passed.
+
+        Called with the send lock held, so concurrent callers queue behind it.
+        """
+        if self._min_send_interval is None:
+            return
+        wait = self._next_send_at - self._now()
+        if wait > 0:
+            await self._sleep(wait)
+        self._next_send_at = max(self._now(), self._next_send_at) + self._min_send_interval
 
     async def _extend_pause(self, delay: float) -> None:
         """Push the shared open time out. A shorter delay does not pull it in."""
