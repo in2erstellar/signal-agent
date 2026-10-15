@@ -18,6 +18,7 @@ from app.config import (
     AI_REVIEW_PROVIDER,
     ALERT_DISPATCH_INTERVAL_SECONDS,
     BAIT_POLL_INTERVAL_SECONDS,
+    DISCOVERY_QUALIFY_PRE_MIGRATION,
     DISCOVERY_REVIEW_INTERVAL_SECONDS,
     FAST_SCAN_CONCURRENCY,
     FUNDER_GRAPH_CONCURRENCY,
@@ -173,7 +174,9 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         opener=open_pumpportal_socket,
         notifier=notify_discovery_down,
     )
-    discovery = TokenDiscovery(sessions, redis, helius)
+    discovery = TokenDiscovery(
+        sessions, redis, helius, qualify_pre_migration=DISCOVERY_QUALIFY_PRE_MIGRATION
+    )
 
     def funder_factory(session: object) -> FunderGraphBuilder:
         # The scan semaphore already wraps the whole message. Acquiring it

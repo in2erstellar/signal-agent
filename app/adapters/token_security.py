@@ -9,7 +9,9 @@ first. An empty Raydium list falls through to the canonical PumpSwap pool,
 which supplies the LP mint and vault addresses only. A balance counts as
 locked only when its owner is the incinerator burn wallet or an account
 owned by Raydium's Burn & Earn / LP Lock program. SPL ``burn`` that only
-shrinks supply is not visible here. ``Pool.lp_supply`` is never that supply.
+shrinks supply is not visible in the holder rows. For PumpSwap the book also
+carries ``Pool.lp_supply`` (LP minted into the pool, not lowered by burns) so
+the scanner can count that burn; it is never used as the current supply.
 """
 
 from __future__ import annotations
@@ -74,6 +76,9 @@ class LpBook:
     rows: list[LpHolderRow]
     liquidity_usd: Decimal | None = None
     price_usd: Decimal | None = None
+    # PumpSwap only: ``Pool.lp_supply``, the LP minted into the pool. SPL burn
+    # does not lower it, so ``original - supply_raw`` is the burned LP.
+    original_supply_raw: int | None = None
 
 
 class HeliusTokenSecurity:
@@ -128,6 +133,7 @@ class HeliusTokenSecurity:
     async def lp_book(self, mint: str) -> LpBook:
         quote = await self._raydium.pool_quote(mint)
         lp_mint = quote.lp_mint
+        original_supply: int | None = None
         if lp_mint is None and self._pumpswap is not None:
             # None means the canonical account is absent (same as an empty
             # Raydium list). A parse error propagates and is not "no pool".
@@ -135,6 +141,7 @@ class HeliusTokenSecurity:
             pool = await self._pumpswap.canonical_pool(mint)
             if pool is not None:
                 lp_mint = pool.lp_mint
+                original_supply = pool.lp_supply
         if lp_mint is None:
             return LpBook(
                 lp_mint=None,
@@ -150,6 +157,7 @@ class HeliusTokenSecurity:
             rows=custody.rows,
             liquidity_usd=quote.tvl_usd,
             price_usd=quote.price_usd,
+            original_supply_raw=original_supply,
         )
 
     async def lp_custody(self, lp_mint: str) -> LpBook:

@@ -164,6 +164,7 @@ class RiskScanner:
                 mint=mint,
                 reason=type(exc).__name__,
                 error_type=type(exc).__name__,
+                error=str(exc),
             )
             return CheckResult(
                 name=name,
@@ -221,6 +222,29 @@ class RiskScanner:
                 "data incomplete: " + ", ".join(missing),
             )
         self._pool_status = "observed"
+        original = book.original_supply_raw
+        if original is not None and original > 0:
+            # PumpSwap: LP burned by SPL burn left the supply, so it is counted
+            # against what was minted into the pool. Pump.fun migrations burn
+            # all of it (live check 2026-10-15: lp_supply ~4.19e12, mint supply 0).
+            burned_raw = max(0, original - book.supply_raw)
+            held_raw = sum(
+                row.amount_raw for row in book.rows if row.is_burn_address or row.is_lock_program
+            )
+            share = min(Decimal(1), Decimal(burned_raw + held_raw) / Decimal(original))
+            if share >= LP_LOCKED_MIN_SHARE:
+                return (
+                    True,
+                    f"{share:.4f} of the LP minted into the PumpSwap pool for {book.lp_mint} "
+                    "was burned or sits at a burn address or lock program. "
+                    "This does not prove the liquidity can never be removed.",
+                )
+            return (
+                False,
+                f"Burned or locked LP share for {book.lp_mint} is {share:.4f} of the LP "
+                f"minted into the PumpSwap pool. Below {LP_LOCKED_MIN_SHARE}. "
+                "High-risk rug-pull pattern.",
+            )
         if book.supply_raw <= 0:
             return (
                 False,

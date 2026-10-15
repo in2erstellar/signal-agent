@@ -290,3 +290,38 @@ async def test_pre_migration_scan_skips_funder_graph_and_wallet_rows_do_not(
     assert wallet is not None
     assert wallet.funder_graph_status == FUNDER_GRAPH_BUILT
     assert wallet.discovery_status is None
+
+
+async def test_post_migration_only_mode_never_polls_holders(discovery_stack: tuple) -> None:
+    sessions, redis, clock = discovery_stack
+    holders = Holders({MINT: [CREATOR, CURVE, BUYER]})
+    discovery = TokenDiscovery(
+        sessions, redis, holders, clock=clock, qualify_pre_migration=False
+    )
+    await discovery.ingest_create(_event())
+
+    counts = await discovery.review_pending()
+
+    assert counts.checked == 0
+    assert counts.qualified == 0
+    assert holders.calls == []
+    assert await redis.xlen(RISK_SCAN_QUEUE) == 0
+    async with sessions() as session:
+        token = await session.scalar(select(Token).where(Token.mint == MINT))
+    assert token is not None
+    assert token.discovery_status == DISCOVERY_PENDING
+
+
+async def test_post_migration_only_mode_still_marks_old_creates_dead(
+    discovery_stack: tuple,
+) -> None:
+    sessions, redis, clock = discovery_stack
+    discovery = TokenDiscovery(
+        sessions, redis, Holders({}), clock=clock, qualify_pre_migration=False
+    )
+    await discovery.ingest_create(_event())
+    clock.now = T0 + timedelta(hours=25)
+
+    counts = await discovery.review_pending()
+
+    assert counts.dead == 1

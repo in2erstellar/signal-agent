@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.adapters.token_security import HolderBook, LpBook, LpHolderRow, MintView
 from app.config import (
+    POST_MIGRATION_RETRY_DELAYS_SECONDS,
     RISK_CHECK_WEIGHTS,
     RISK_HEAVY_GROUP,
     RISK_HEAVY_QUEUE,
@@ -30,6 +31,7 @@ from app.services.token_store import (
     HEAVY_SCAN_COMPLETE,
     HEAVY_SCAN_FAILED,
     HEAVY_SCAN_PENDING,
+    HEAVY_SCAN_SKIPPED,
     insert_token,
 )
 from app.workers.risk_scan_worker import PrebuiltClusters, RiskScanWorker
@@ -465,3 +467,78 @@ async def test_startup_moves_undelivered_post_migrations_and_leaves_the_pel(stac
     pending = await redis.xpending(RISK_SCAN_QUEUE, RISK_SCAN_GROUP)
     assert int(pending["pending"]) == 1
     assert pending["min"] == claimed
+
+
+async def _seed_migration(sessions: async_sessionmaker[AsyncSession], redis: Redis) -> None:
+    async with sessions() as session:
+        async with session.begin():
+            await insert_token(
+                session,
+                mint=MIGRATION_MINT,
+                first_seen_at=T0,
+                creator_address=CREATOR,
+                funder_graph_status=FUNDER_GRAPH_PENDING_POST,
+            )
+    await redis.xadd(
+        RISK_SCAN_PRIORITY_QUEUE,
+        {"mint": MIGRATION_MINT, "trace_id": "trace-migration", "reason": "post_migration"},
+    )
+
+
+async def _clear_backoff(redis: Redis) -> None:
+    for key in await redis.keys("funder_backoff:*"):
+        await redis.delete(key)
+
+
+async def test_post_migration_pool_not_yet_visible_is_rescanned(stack: tuple) -> None:
+    sessions, redis, _engine = stack
+    facts = _Facts()
+    visible = False
+    real_lp_book = facts.lp_book
+
+    async def lp_book(mint: str) -> LpBook:
+        if not visible:
+            return LpBook(None, None, [])
+        return await real_lp_book(mint)
+
+    facts.lp_book = lp_book  # type: ignore[method-assign]
+    await _seed_migration(sessions, redis)
+    worker = _worker(sessions, redis, facts, _Graph(), _Clock(T0))
+
+    assert await worker.run_once() == (0, 0)
+    pending = await redis.xpending(RISK_SCAN_PRIORITY_QUEUE, RISK_SCAN_PRIORITY_GROUP)
+    assert int(pending["pending"]) == 1
+    assert await redis.xlen(RISK_HEAVY_QUEUE) == 0
+    # Still inside the delay: the pending message is not rescanned.
+    assert await worker.run_once() == (0, 0)
+
+    visible = True
+    await _clear_backoff(redis)
+    assert await worker.run_once() == (1, 0)
+    pending = await redis.xpending(RISK_SCAN_PRIORITY_QUEUE, RISK_SCAN_PRIORITY_GROUP)
+    assert int(pending["pending"]) == 0
+    assert await redis.xlen(RISK_HEAVY_QUEUE) == 1
+
+
+async def test_post_migration_retries_end_in_skipped(stack: tuple) -> None:
+    sessions, redis, _engine = stack
+    facts = _Facts()
+
+    async def lp_book(mint: str) -> LpBook:
+        del mint
+        return LpBook(None, None, [])
+
+    facts.lp_book = lp_book  # type: ignore[method-assign]
+    await _seed_migration(sessions, redis)
+    worker = _worker(sessions, redis, facts, _Graph(), _Clock(T0))
+
+    for _ in range(len(POST_MIGRATION_RETRY_DELAYS_SECONDS)):
+        assert await worker.run_once() == (0, 0)
+        await _clear_backoff(redis)
+    assert await worker.run_once() == (1, 0)
+
+    async with sessions() as session:
+        token = await session.scalar(select(Token).where(Token.mint == MIGRATION_MINT))
+    assert token is not None
+    assert token.heavy_scan_status == HEAVY_SCAN_SKIPPED
+    assert await redis.xlen(RISK_HEAVY_QUEUE) == 0

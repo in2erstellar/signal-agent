@@ -16,6 +16,8 @@ from app.config import RISK_SCAN_PRIORITY_QUEUE, RISK_SCAN_QUEUE
 from app.db.models import Token
 from app.services.risk_scanner import CheckResult, RiskReport
 from app.services.token_store import (
+    DISCOVERY_PENDING,
+    DISCOVERY_QUALIFIED,
     FUNDER_GRAPH_BUILT,
     FUNDER_GRAPH_COMPLETED_POST,
     FUNDER_GRAPH_PENDING_POST,
@@ -180,3 +182,20 @@ async def test_post_migration_scan_builds_a_fresh_graph(stack: tuple) -> None:
     assert token is not None
     assert token.funder_graph_status == FUNDER_GRAPH_COMPLETED_POST
     assert token.liquidity_usd == Decimal("9000")
+
+
+async def test_migration_of_a_never_qualified_create_qualifies_it(stack: tuple) -> None:
+    sessions, redis = stack
+    discovery = TokenDiscovery(
+        sessions, redis, _Holders(), clock=lambda: T0, qualify_pre_migration=False
+    )
+    await discovery.ingest_create(_create())
+    assert (await _token(sessions)).discovery_status == DISCOVERY_PENDING  # type: ignore[union-attr]
+
+    assert await discovery.handle_migration(_migration()) is True
+
+    token = await _token(sessions)
+    assert token is not None
+    assert token.discovery_status == DISCOVERY_QUALIFIED
+    assert token.funder_graph_status == FUNDER_GRAPH_PENDING_POST
+    assert await redis.xlen(RISK_SCAN_PRIORITY_QUEUE) == 1

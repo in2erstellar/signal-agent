@@ -319,6 +319,16 @@ MAX_FUNDING_TRANSACTION_INSPECT = 25
 # revisited over several cycles instead of one RPC burst per minute.
 DISCOVERY_DOWN_ALERT_SECONDS = 300
 DISCOVERY_PENDING_BATCH = 20
+# False: bonding-curve creates are stored but not polled for a foreign holder.
+# Fusion cannot signal them (LP lock and the funder graph stay unavailable on
+# the curve), and the holder polls were most of the Helius budget. Mints are
+# scanned when PumpPortal reports their migration.
+DISCOVERY_QUALIFY_PRE_MIGRATION = False
+# A post-migration fast scan can run before the RPC node shows the new PumpSwap
+# pool (seen live: no pool 4s after the migration event, present minutes later).
+# An unavailable fast check on such a scan waits this long, then rescans,
+# once per entry, before the mint is marked skipped.
+POST_MIGRATION_RETRY_DELAYS_SECONDS: tuple[float, ...] = (20.0, 60.0, 180.0)
 DISCOVERY_REVIEW_INTERVAL_SECONDS = 30
 DISCOVERY_PENDING_MAX_AGE_HOURS = 24
 # Holder checks prefer mints first seen inside this window. Older pending rows

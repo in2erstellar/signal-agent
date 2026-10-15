@@ -94,8 +94,10 @@ class TokenDiscovery:
         pending_batch: int = DISCOVERY_PENDING_BATCH,
         pending_max_age: timedelta | None = None,
         fresh_window: timedelta | None = None,
+        qualify_pre_migration: bool = True,
     ) -> None:
         self._sessions = sessions
+        self._qualify_pre_migration = qualify_pre_migration
         self._redis = redis
         self._holders = holders
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -158,6 +160,9 @@ class TokenDiscovery:
                     return False
                 token.funder_graph_status = FUNDER_GRAPH_PENDING_POST
                 token.trace_id = trace_id
+                if token.discovery_status in {DISCOVERY_PENDING, DISCOVERY_DEAD}:
+                    # A completed curve is proof of foreign buyers.
+                    token.discovery_status = DISCOVERY_QUALIFIED
                 await self._redis.xadd(
                     RISK_SCAN_PRIORITY_QUEUE,
                     {"mint": event.mint, "trace_id": trace_id, "reason": "post_migration"},
@@ -175,6 +180,18 @@ class TokenDiscovery:
     async def review_pending(self) -> ReviewCounts:
         now = self._clock()
         dead = await self._mark_dead(now)
+        if not self._qualify_pre_migration:
+            # Only the 24h dead path runs. Migration events queue the scans.
+            logger.info(
+                "token_discovery_review",
+                checked=0,
+                qualified=0,
+                dead=dead,
+                creates=self.creates,
+                migrations_queued=self.migrations_queued,
+                mode="post_migration_only",
+            )
+            return ReviewCounts(qualified=0, dead=dead, checked=0)
         batch, fresh_checked, backlog_checked = await self._next_batch(now)
         qualified = 0
         for item in batch:

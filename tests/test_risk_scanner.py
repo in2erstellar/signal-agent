@@ -428,3 +428,44 @@ def test_composite_score_ignores_failed_and_unavailable() -> None:
         CheckResult(name="check_funder_cluster_exposure", passed=False, detail="flag"),
     ]
     assert composite_risk_score(checks) == 20 + 15
+
+
+async def test_pumpswap_lp_burned_at_migration_passes() -> None:
+    # Live shape after a pump.fun migration: LP mint supply 0, Pool.lp_supply ~4.19e12.
+    book = LpBook(LP_MINT, 0, [], original_supply_raw=4_193_388_282_727)
+    scanner, _, _ = _scanner(FakeFacts(lp_book=book))
+    passed, detail = await scanner._check_lp_lock(MINT)
+    assert passed is True
+    assert "PumpSwap" in detail
+    assert LP_MINT in detail
+    _assert_risk_language(detail)
+
+
+async def test_pumpswap_burn_plus_lock_rows_count_against_minted_lp() -> None:
+    # 900 of 1000 burned; 60 of the 100 left sit in a lock program: 0.96 locked.
+    book = LpBook(
+        LP_MINT,
+        100,
+        [
+            LpHolderRow(LOCK_OWNER, 60, is_burn_address=False, is_lock_program=True),
+            LpHolderRow("wallet", 40, is_burn_address=False, is_lock_program=False),
+        ],
+        original_supply_raw=1_000,
+    )
+    scanner, _, _ = _scanner(FakeFacts(lp_book=book))
+    passed, _detail = await scanner._check_lp_lock(MINT)
+    assert passed is (Decimal("0.96") >= LP_LOCKED_MIN_SHARE)
+
+
+async def test_pumpswap_lp_mostly_held_by_a_wallet_is_high_risk() -> None:
+    book = LpBook(
+        LP_MINT,
+        1_000,
+        [LpHolderRow("wallet", 1_000, is_burn_address=False, is_lock_program=False)],
+        original_supply_raw=1_000,
+    )
+    scanner, _, _ = _scanner(FakeFacts(lp_book=book))
+    passed, detail = await scanner._check_lp_lock(MINT)
+    assert passed is False
+    assert "High-risk" in detail
+

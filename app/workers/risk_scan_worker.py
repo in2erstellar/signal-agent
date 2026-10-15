@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import (
     MAX_FUNDER_LOOKUP_RETRIES,
+    POST_MIGRATION_RETRY_DELAYS_SECONDS,
     RISK_CHECK_WEIGHTS,
     RISK_HEAVY_GROUP,
     RISK_HEAVY_QUEUE,
@@ -65,6 +66,16 @@ _PROTECTED_FUNDER_STATUSES = frozenset(
         FUNDER_GRAPH_FAILED,
     }
 )
+
+class _RetryFastScan(Exception):
+    """Leave the message pending and rescan after ``delay`` seconds."""
+
+    def __init__(self, attempt: int, delay: float, reason: str) -> None:
+        super().__init__(reason)
+        self.attempt = attempt
+        self.delay = delay
+        self.reason = reason
+
 
 FunderFactory = Callable[[AsyncSession], Any]
 ScannerFactory = Callable[[AsyncSession, list[FunderCluster]], RiskScanner]
@@ -335,6 +346,17 @@ class RiskScanWorker:
                 )
             await self._redis.xack(queue, group, message_id)
             return 1, 0
+        except _RetryFastScan as retry:
+            await self._arm_delay(message_id, retry.delay)
+            with bind_trace(trace_id):
+                logger.info(
+                    "risk_scan_post_migration_retry",
+                    mint=mint,
+                    attempt=retry.attempt,
+                    retry_in_seconds=retry.delay,
+                    reason=retry.reason,
+                )
+            return 0, 0
         except Exception as exc:
             with bind_trace(trace_id):
                 logger.warning(
@@ -451,6 +473,17 @@ class RiskScanWorker:
                     list(token.risk_flags),
                     wallet_history=await _has_wallet_history(session, token),
                 )
+                if (
+                    reason is not None
+                    and reason.startswith("fast_check_unavailable")
+                    and prior == FUNDER_GRAPH_PENDING_POST
+                ):
+                    attempt = await self._post_migration_attempt(mint)
+                    if attempt <= len(POST_MIGRATION_RETRY_DELAYS_SECONDS):
+                        # Raising rolls this transaction back; the rescan writes again.
+                        raise _RetryFastScan(
+                            attempt, POST_MIGRATION_RETRY_DELAYS_SECONDS[attempt - 1], reason
+                        )
                 if reason is not None:
                     token.heavy_scan_status = HEAVY_SCAN_SKIPPED
                     logger.info("risk_heavy_skipped", mint=mint, reason=reason)
@@ -574,8 +607,16 @@ class RiskScanWorker:
         await self._redis.expire(key, _RETRY_KEY_TTL_SECONDS)
         return count
 
+    async def _post_migration_attempt(self, mint: str) -> int:
+        key = f"post_migration_retry:{mint}"
+        count = int(await self._redis.incr(key))
+        await self._redis.expire(key, _RETRY_KEY_TTL_SECONDS)
+        return count
+
     async def _arm_backoff(self, message_id: str, attempt: int) -> None:
-        delay = self._retry_backoff_seconds * (2 ** (attempt - 1))
+        await self._arm_delay(message_id, self._retry_backoff_seconds * (2 ** (attempt - 1)))
+
+    async def _arm_delay(self, message_id: str, delay: float) -> None:
         if delay <= 0:
             return
         await self._redis.set(
