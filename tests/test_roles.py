@@ -123,7 +123,7 @@ async def test_menu_shows_wallets_to_admins(sessions: object) -> None:
 
 async def test_data_migration_promotes_the_previous_owner_list(pipeline_infra: object) -> None:
     statement = "UPDATE users SET role = 'admin' WHERE telegram_id IN (8700246141)"
-    source = (ROOT / "alembic/versions/0008_promote_admins.py").read_text()
+    source = (ROOT / "alembic/versions/0008_promote_admins.py").read_text(encoding="utf-8")
     assert statement in source
 
     engine = create_async_engine(pipeline_infra.database_url)  # type: ignore[attr-defined]

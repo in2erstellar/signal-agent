@@ -33,5 +33,5 @@ def test_schema_mismatch_refuses_start() -> None:
 def test_schema_head_is_read_from_the_migration_scripts() -> None:
     head = code_schema_head()
     versions = list((ROOT / "alembic" / "versions").glob("*.py"))
-    assert any(head in path.read_text() for path in versions)
-    assert head not in Path("app/services/startup_checks.py").read_text()
+    assert any(head in path.read_text(encoding="utf-8") for path in versions)
+    assert head not in Path("app/services/startup_checks.py").read_text(encoding="utf-8")
