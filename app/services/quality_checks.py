@@ -173,6 +173,21 @@ def verdict(checks: list[QualityCheck]) -> QualityVerdict:
     )
 
 
+_REVIEW_STATUS = {PASS: "pass", FAIL: "fail", UNAVAILABLE: "no data"}
+
+
+def checklist_for_review(context: object) -> tuple[str, ...]:
+    """Stored checklist rows as ``status: text`` lines for the AI note."""
+    rows = context.get("quality_checks") if isinstance(context, dict) else None
+    if not isinstance(rows, list):
+        return ()
+    return tuple(
+        f"{_REVIEW_STATUS.get(str(row.get('status')), 'no data')}: {row.get('text', '')}"
+        for row in rows
+        if isinstance(row, dict)
+    )
+
+
 def best_possible(checks: list[QualityCheck]) -> int:
     """Passed lines if every external line that is not in yet came back as a pass."""
     return sum(
@@ -278,7 +293,7 @@ def _buy_pressure_check(dex: DexQuote | None) -> QualityCheck:
     key, group = "buy_pressure", "market"
     if dex is None or dex.buys_5m is None or dex.sells_5m is None:
         return QualityCheck(key, group, UNAVAILABLE, "Last 5 min buys vs sells: no data")
-    text = f"Last 5 min: {dex.buys_5m} buys / {dex.sells_5m} sells"
+    text = f"Last 5 min: {_plural(dex.buys_5m, 'buy')} / {_plural(dex.sells_5m, 'sell')}"
     status = PASS if dex.buys_5m > dex.sells_5m else FAIL
     return QualityCheck(key, group, status, text)
 
@@ -294,7 +309,7 @@ def _clone_check(clone_count: int | None, symbol: str | None) -> QualityCheck:
         key,
         group,
         FAIL,
-        f"{clone_count} other tokens named {symbol} in {window}",
+        f"{_plural(clone_count, 'other token')} named {symbol} in {window}",
     )
 
 
@@ -308,6 +323,10 @@ def _socials_check(readings: ExternalReadings) -> QualityCheck:
     if readings.metadata_links is None:
         return QualityCheck(key, group, UNAVAILABLE, "Socials: no data")
     return QualityCheck(key, group, FAIL, "No socials listed")
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def _percent(share: Decimal) -> str:

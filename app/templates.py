@@ -418,6 +418,26 @@ def creator_context(context: dict[str, object] | None) -> dict[str, object] | No
     return rest or None
 
 
+def _short_creator_lines(context: dict[str, object], *, over_limit: bool) -> list[str]:
+    """Creator wallet, then past-launch lines only when there is a past launch.
+
+    The creator-share line already sits in the checklist, so it is not repeated.
+    """
+    lines = [f"{ICON_CREATOR} Creator: {_code(context['creator'])}"]
+    launches = context.get("launches_since_tracking")
+    if isinstance(launches, int) and launches > 0:
+        lines.append(f"Previous launches since tracking started: {_code(launches)}")
+        drop = str(context.get("price_drop_shown", "unavailable"))
+        if not drop.startswith("unavailable"):
+            lines.append(f"First-hour drop over 90%: {_code(drop)}")
+        stayed = str(context.get("lp_stayed_shown", "unavailable"))
+        if not stayed.startswith("unavailable"):
+            lines.append(_lp_history_line(stayed))
+    if over_limit:
+        lines.append(f"{ICON_DISTRIBUTION} Creator-funder supply is above your limit.")
+    return lines
+
+
 def _checklist_tail(
     lines: list[str],
     *,
@@ -430,7 +450,7 @@ def _checklist_tail(
         lines.extend(["", f"<b>{BAIT_WARNING}</b>"])
     creator = creator_context(context)
     if creator is not None and creator.get("creator"):
-        lines.extend(["", ICON_SECTION, creator_block_text(creator, over_limit=creator_over_limit)])
+        lines.extend(["", *_short_creator_lines(creator, over_limit=creator_over_limit)])
     lines.extend(_review_lines(ai_review))
     lines.extend(["", DISCLAIMER])
     return lines

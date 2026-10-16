@@ -82,6 +82,9 @@ class TokenReviewInput:
     risk_flags: tuple[str, ...]
     liquidity_usd: str | None
     composite_score: str | None
+    # The card's checklist as "pass|fail|no data: text" lines. When present it
+    # replaces the older score fields, so the note cannot contradict the card.
+    checklist: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -282,6 +285,8 @@ def estimate_review_tokens(token: TokenReviewInput) -> int:
 
 
 def _user_prompt(token: TokenReviewInput) -> str:
+    if token.checklist:
+        return _checklist_prompt(token)
     flags = ", ".join(token.risk_flags) if token.risk_flags else "none"
     return "\n".join(
         [
@@ -298,6 +303,24 @@ def _user_prompt(token: TokenReviewInput) -> str:
             "100 means every check passed, and a lower value means a failed or "
             "unknown check. Higher is better. It is not a claim the token is safe. "
             "Describe each failed check by name.",
+        ]
+    )
+
+
+def _checklist_prompt(token: TokenReviewInput) -> str:
+    passed = sum(1 for line in token.checklist if line.startswith("pass:"))
+    return "\n".join(
+        [
+            f"mint: {token.mint}",
+            f"symbol: {token.symbol or 'unknown'}",
+            f"name: {token.name or 'unknown'}",
+            f"checks passed: {passed} of {len(token.checklist)}",
+            "checklist (status: reading):",
+            *(f"- {line}" for line in token.checklist),
+            "These lines are already shown to the reader above your note. "
+            "Do not repeat them one by one. Say in plain words what the failed and "
+            "no-data lines mean together for the risk of this token. Use only the "
+            "numbers in these lines. A passed line is not proof the token is safe.",
         ]
     )
 

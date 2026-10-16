@@ -58,6 +58,7 @@ from app.services.quality_checks import (
     QualityVerdict,
     best_possible,
     build_checklist,
+    checklist_for_review,
     verdict,
 )
 from app.services.quality_inputs import QualityReader
@@ -458,10 +459,16 @@ class SignalFusion:
                     wallet_score=str(wallet_score) if wallet_score is not None else None,
                     bait_flag_penalty=str(penalty or 0),
                 )
-            await self._enqueue_review(token, now, score)
+            await self._enqueue_review(token, now, score, context)
         return inserted
 
-    async def _enqueue_review(self, token: Token, now: datetime, score: Decimal) -> None:
+    async def _enqueue_review(
+        self,
+        token: Token,
+        now: datetime,
+        score: Decimal,
+        context: dict[str, Any] | None = None,
+    ) -> None:
         redis = self._redis
         if not self._reviews_enabled or redis is None:
             return
@@ -471,7 +478,7 @@ class SignalFusion:
             return
         hour, day = await review_counts(redis, now)
         spent_tokens = await tokens_used(redis, now)
-        estimate = estimate_review_tokens(_review_input(token, score))
+        estimate = estimate_review_tokens(_review_input(token, score, context))
         if not qualifies_for_ai_review(
             token,
             reviews_this_hour=hour,
@@ -534,7 +541,11 @@ async def _clone_count(session: AsyncSession, token: Token, now: datetime) -> in
     return int(count or 0)
 
 
-def _review_input(token: Token, score: Decimal) -> TokenReviewInput:
+def _review_input(
+    token: Token,
+    score: Decimal,
+    context: dict[str, Any] | None = None,
+) -> TokenReviewInput:
     flags = token.risk_flags if isinstance(token.risk_flags, list) else []
     return TokenReviewInput(
         mint=token.mint,
@@ -544,6 +555,7 @@ def _review_input(token: Token, score: Decimal) -> TokenReviewInput:
         risk_flags=tuple(str(flag) for flag in flags),
         liquidity_usd=None if token.liquidity_usd is None else str(token.liquidity_usd),
         composite_score=str(score),
+        checklist=checklist_for_review(context),
     )
 
 

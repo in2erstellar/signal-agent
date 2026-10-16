@@ -8,7 +8,7 @@ budget reservation. A permanent error refunds that reservation.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 import structlog
@@ -32,6 +32,7 @@ from app.services.ai_budget import (
     reconcile_tokens,
     release_review,
 )
+from app.services.quality_checks import checklist_for_review
 from app.services.token_store import (
     AI_REVIEW_COMPLETED,
     AI_REVIEW_FAILED,
@@ -40,6 +41,9 @@ from app.services.token_store import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# How long a queued review waits for its signal row before giving up.
+SIGNAL_WAIT = timedelta(minutes=10)
 
 Clock = Callable[[], datetime]
 
@@ -120,6 +124,15 @@ class AiReviewWorker:
                 logger.info("ai_review_already_truncated", mint=mint)
                 return True
             signal = await session.scalar(select(Signal).where(Signal.token_id == token.id))
+            if signal is None:
+                # Fusion enqueues inside its transaction, so the row can lag the
+                # message by a cycle. A note without it would contradict the card.
+                if not self._signal_can_still_arrive(fields):
+                    await self._refund(fields)
+                    logger.warning("ai_review_signal_missing", mint=mint)
+                    return True
+                logger.info("ai_review_waiting_for_signal", mint=mint)
+                return False
             flags = token.risk_flags if isinstance(token.risk_flags, list) else []
             review_input = TokenReviewInput(
                 mint=token.mint,
@@ -128,7 +141,8 @@ class AiReviewWorker:
                 risk_score=None if token.risk_score is None else str(token.risk_score),
                 risk_flags=tuple(str(flag) for flag in flags),
                 liquidity_usd=None if token.liquidity_usd is None else str(token.liquidity_usd),
-                composite_score=None if signal is None else str(signal.composite_score),
+                composite_score=str(signal.composite_score),
+                checklist=checklist_for_review(signal.context),
             )
         try:
             review = await self._client.generate_token_review(review_input)
@@ -217,6 +231,12 @@ class AiReviewWorker:
                     token.ai_review_status = AI_REVIEW_FAILED
         await self._refund(fields)
         logger.info("ai_review_permanent_failure", mint=mint)
+
+    def _signal_can_still_arrive(self, fields: dict[str, str]) -> bool:
+        moment = _reserved_at(fields)
+        if moment is None:
+            return False
+        return self._clock() - moment < SIGNAL_WAIT
 
     async def _refund(self, fields: dict[str, str]) -> None:
         moment = _reserved_at(fields)
