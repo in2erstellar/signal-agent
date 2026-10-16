@@ -120,3 +120,16 @@ def test_counts_read_as_english() -> None:
     assert _clone_check(1, "TWMW").text == "1 other token named TWMW in 24h"
     assert _clone_check(2, "TWMW").text == "2 other tokens named TWMW in 24h"
     assert _buy_pressure_check(_dex(buys_5m=1, sells_5m=1)).text == "Last 5 min: 1 buy / 1 sell"
+
+
+def test_bot_card_opens_with_the_channel_summary_then_all_lines() -> None:
+    from app.templates import creator_context
+
+    market = {"market_cap_usd": "69200", "liquidity_usd": "17800", "buys_5m": 66, "sells_5m": 10}
+    text = _card({"market": market})
+    summary = text.split("<pre>")[1].split("</pre>")[0]
+    assert "MCap  $69.2k" in summary
+    assert "Safety   ▰▱▱ 1/3" in summary
+    assert text.index("<pre>") < text.index("Mint authority revoked")
+    assert "⚪ Socials: no data" in text
+    assert creator_context({"market": market, "creator": "x"}) == {"creator": "x"}

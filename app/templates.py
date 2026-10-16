@@ -60,7 +60,7 @@ STORED_SCAN_NOTE = (
 # old "risk_score" label read as "more risk" to users and to the AI review.
 CHECKS_PASSED_LABEL = "Checks passed"
 
-QUALITY_KEYS = ("quality_checks", "quality_passed", "quality_total")
+QUALITY_KEYS = ("quality_checks", "quality_passed", "quality_total", "market")
 QUALITY_GROUPS = (
     ("contract", ICON_LP_LOCKED, "Contract"),
     ("holders", ICON_CREATOR, "Holders"),
@@ -91,6 +91,31 @@ def channel_signal_text(
     total = len(checks)
     icon = ICON_RISK_LOW if passed == total else ICON_RISK_MED
     when = triggered_at.astimezone(timezone.utc).strftime("%H:%M UTC, %d %b")
+    return "\n".join(
+        [
+            f"{icon} <b>{escape(symbol or 'no ticker')}</b> — {passed}/{total} checks passed",
+            f"Signal: {when}",
+            f"<pre>{escape(summary_block(mint, checks, market_cap, market))}</pre>",
+            _code(mint),
+            "Results follow as replies: 1h · 24h · 7d. Every signal, wins and losses.",
+            f"<i>{QUALITY_NOTE}</i>",
+        ]
+    )
+
+
+def summary_block(
+    mint: str,
+    checks: list[dict[str, object]],
+    market_cap: Decimal | None,
+    market: dict[str, object] | None,
+) -> str:
+    """Mascot beside the start figures, then the safety bar and one bar per group.
+
+    Plain text for a ``<pre>`` block; callers escape it. Same block in the
+    channel post and the bot card, so the two read alike.
+    """
+    passed = sum(1 for row in checks if row.get("status") == "pass")
+    total = len(checks)
     snapshot = market or {}
     liquidity = _decimal_or_none(snapshot.get("liquidity_usd"))
     buys, sells = snapshot.get("buys_5m"), snapshot.get("sells_5m")
@@ -108,16 +133,7 @@ def channel_signal_text(
             continue
         ok = sum(1 for row in members if row.get("status") == "pass")
         block.append(f"{title:<9}{'█' * ok}{'░' * (len(members) - ok)} {ok}/{len(members)}")
-    return "\n".join(
-        [
-            f"{icon} <b>{escape(symbol or 'no ticker')}</b> — {passed}/{total} checks passed",
-            f"Signal: {when}",
-            f"<pre>{escape(chr(10).join(block))}</pre>",
-            _code(mint),
-            "Results follow as replies: 1h · 24h · 7d. Every signal, wins and losses.",
-            f"<i>{QUALITY_NOTE}</i>",
-        ]
-    )
+    return "\n".join(block)
 
 
 def _decimal_or_none(raw: object) -> Decimal | None:
@@ -450,7 +466,7 @@ def alert_text(
     context: dict[str, object] | None = None,
     creator_over_limit: bool = False,
 ) -> str:
-    checklist = quality_lines(context, symbol=symbol)
+    checklist = quality_lines(context, symbol=symbol, mint=mint)
     if checklist is not None:
         lines = [checklist[0], solscan_token(mint), *checklist[1:]]
         return "\n".join(
@@ -482,17 +498,28 @@ def alert_text(
     return "\n".join(lines)
 
 
-def quality_lines(context: dict[str, object] | None, *, symbol: str | None) -> list[str] | None:
-    """Header plus grouped checklist lines, or None for a signal stored before it."""
+def quality_lines(
+    context: dict[str, object] | None,
+    *,
+    symbol: str | None,
+    mint: str,
+) -> list[str] | None:
+    """Header, summary block, and the full grouped checklist; None before checklists."""
     raw = context.get("quality_checks") if isinstance(context, dict) else None
-    if not isinstance(raw, list) or not raw:
+    if not isinstance(context, dict) or not isinstance(raw, list) or not raw:
         return None
     rows = [row for row in raw if isinstance(row, dict)]
     passed = sum(1 for row in rows if row.get("status") == "pass")
     total = len(rows)
     icon = ICON_RISK_LOW if passed == total else ICON_RISK_MED
     name = escape(symbol or "no ticker")
-    lines = [f"{icon} <b>{name}</b> — <b>{passed}/{total}</b> checks passed"]
+    raw_market = context.get("market")
+    market = raw_market if isinstance(raw_market, dict) else {}
+    cap = _decimal_or_none(market.get("market_cap_usd"))
+    lines = [
+        f"{icon} <b>{name}</b> — <b>{passed}/{total}</b> checks passed",
+        f"<pre>{escape(summary_block(mint, rows, cap, market))}</pre>",
+    ]
     for group, group_icon, title in QUALITY_GROUPS:
         members = [row for row in rows if row.get("group") == group]
         if not members:
@@ -575,7 +602,7 @@ def risk_card_text(
     context: dict[str, object] | None = None,
     creator_over_limit: bool = False,
 ) -> str:
-    checklist = quality_lines(context, symbol=symbol)
+    checklist = quality_lines(context, symbol=symbol, mint=mint)
     if checklist is not None:
         lines = [checklist[0], solscan_token(mint)]
         if triggered_at is not None:
