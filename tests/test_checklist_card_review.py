@@ -130,6 +130,7 @@ def test_bot_card_opens_with_the_channel_summary_then_all_lines() -> None:
     summary = text.split("<pre>")[1].split("</pre>")[0]
     assert "MCap  $69.2k" in summary
     assert "Safety   ▰▱▱ 1/3" in summary
-    assert text.index("<pre>") < text.index("Mint authority revoked")
-    assert "⚪ Socials: no data" in text
+    assert " ✓ Mint revoked" in summary
+    assert " ✗ Launch trades 8 (≤3)" in summary
+    assert " ? Socials: no data" in summary
     assert creator_context({"market": market, "creator": "x"}) == {"creator": "x"}

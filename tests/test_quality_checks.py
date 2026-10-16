@@ -301,11 +301,13 @@ def test_card_shows_every_line_with_its_icon_and_the_rule() -> None:
         context=context,
     )
     assert "<b>MOO&lt;</b> — <b>10/12</b> checks passed" in text
-    assert text.count("✅") == 10
-    assert text.count("❌") == 1
-    assert "⚪ Trades in the first 2 blocks: no data" in text
+    box = text.split("<pre>")[1].split("</pre>")[0]
+    assert box.count(" ✓ ") == 10
+    assert box.count(" ✗ ") == 1
+    assert " ? Launch trades: no data" in box
+    assert max(len(line) for line in box.replace("&quot;", '"').split("\n")) <= 32
     for title in ("Contract", "Holders", "Market"):
-        assert f"<b>{title}</b>" in text
+        assert f"\n{title} " in box
     assert "Signal score" not in text
     assert "It does not predict price" in text
     assert creator_context(context) == MEASURED

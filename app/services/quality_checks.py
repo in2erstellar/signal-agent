@@ -8,6 +8,7 @@ patterns. None of them predicts price.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -186,6 +187,75 @@ def checklist_for_review(context: object) -> tuple[str, ...]:
         for row in rows
         if isinstance(row, dict)
     )
+
+
+# Short forms for the monospace box: (no-data label, passed, failed). A
+# ``{n}`` is filled from the numbers in the stored long text.
+def _short_forms() -> dict[str, tuple[str, str, str]]:
+    return {
+        "mint_authority": ("Mint", "Mint revoked", "Mint still active"),
+        "freeze_authority": ("Freeze", "Freeze revoked", "Freeze still active"),
+        "lp_locked": (
+            "LP",
+            f"LP burned {chr(8805)}{_percent(LP_LOCKED_MIN_SHARE)}",
+            "LP not locked",
+        ),
+        "token_extensions": ("Extensions", "No fee/hook/delegate", "Risky extensions"),
+        "holder_concentration": (
+            "Top-10",
+            f"Top-10 {chr(8804)}{_percent(HOLDER_CONCENTRATION_MAX_SHARE)}",
+            f"Top-10 >{_percent(HOLDER_CONCENTRATION_MAX_SHARE)}",
+        ),
+        "funder_cluster": ("Funders", "No funder cluster", "Funder cluster found"),
+        "socials": ("Socials", "Socials (unverified)", "No socials"),
+    }
+
+
+SHORT_WIDTH = 25
+
+
+def short_line(row: dict[str, Any]) -> str:
+    """At most ``SHORT_WIDTH`` characters for one stored checklist row."""
+    key = str(row.get("key", ""))
+    status = str(row.get("status", UNAVAILABLE))
+    text = str(row.get("text", ""))
+    numbers = re.findall(r"\$?\d+(?:\.\d+)?[k%M]?", text)
+    if status == UNAVAILABLE:
+        label = _short_forms().get(key, ("",))[0] or _NO_DATA_LABELS.get(key) or text.split(":")[0]
+        return _fit(f"{label}: no data")
+    forms = _short_forms()
+    if key in forms:
+        return _fit(forms[key][1 if status == PASS else 2])
+    if key == "creator_share" and numbers:
+        return _fit(f"Creator {numbers[0]} ({chr(8804)}{_percent(SIGNAL_MAX_CREATOR_SHARE)})")
+    if key == "launch_trades" and numbers:
+        return _fit(
+            f"Launch trades {numbers[-2] if len(numbers) > 2 else numbers[0]} ({chr(8804)}{QUALITY_MAX_LAUNCH_TRADES})"
+        )
+    if key == "liquidity" and numbers:
+        return _fit(
+            f"Liq {numbers[0]} ({chr(8805)}{_usd(QUALITY_MIN_LIQUIDITY_USD).replace('.0k', 'k')})"
+        )
+    if key == "buy_pressure" and len(numbers) >= 3:
+        return _fit(f"5m {numbers[1]} buy/{numbers[2]} sell")
+    if key == "not_a_clone":
+        if status == PASS:
+            return "Unique ticker"
+        return _fit(f"Ticker clones: {numbers[0]}" if numbers else "Ticker clones")
+    return _fit(text)
+
+
+_NO_DATA_LABELS = {
+    "creator_share": "Creator",
+    "launch_trades": "Launch trades",
+    "liquidity": "Liquidity",
+    "buy_pressure": "5m trades",
+    "not_a_clone": "Clones",
+}
+
+
+def _fit(text: str) -> str:
+    return text if len(text) <= SHORT_WIDTH else text[: SHORT_WIDTH - 1] + "…"
 
 
 def best_possible(checks: list[QualityCheck]) -> int:

@@ -26,6 +26,7 @@ from app.config import (
 from app.services.ascii_chart import format_usd
 from app.services.channel_results import HorizonResult, verdict_icon
 from app.services.mascots import NEUTRAL, beside, mood_for
+from app.services.quality_checks import short_line
 from app.services.track_record import TrackRecord
 from app.ui_constants import (
     ICON_BAIT_WARNING,
@@ -70,7 +71,7 @@ QUALITY_STATUS_ICONS = {"pass": ICON_CONFIRM, "fail": ICON_CANCEL, "unavailable"
 QUALITY_RULE = (
     "Rule: mint, freeze, LP, and creator share must pass, "
     f"and at least {QUALITY_MIN_PASSED} of 12 lines overall. "
-    f"{ICON_UNAVAILABLE} means no data and counts as not passed."
+    "? means no data and counts as not passed."
 )
 QUALITY_NOTE = "Safety filter only. It does not predict price."
 HOW_CHECKS_BUTTON = "🔍 How checks work"
@@ -108,11 +109,14 @@ def summary_block(
     checks: list[dict[str, object]],
     market_cap: Decimal | None,
     market: dict[str, object] | None,
+    *,
+    detailed: bool = False,
 ) -> str:
     """Mascot beside the start figures, then the safety bar and one bar per group.
 
-    Plain text for a ``<pre>`` block; callers escape it. Same block in the
-    channel post and the bot card, so the two read alike.
+    Plain text for a ``<pre>`` block; callers escape it. The channel post uses
+    the bars only; the bot card (``detailed``) lists each check under its bar.
+    Inside ``<pre>`` the marks are ✓ ✗ ?, since emoji widths differ by phone.
     """
     passed = sum(1 for row in checks if row.get("status") == "pass")
     total = len(checks)
@@ -132,8 +136,17 @@ def summary_block(
         if not members:
             continue
         ok = sum(1 for row in members if row.get("status") == "pass")
+        if detailed:
+            block.append("")
         block.append(f"{title:<9}{'█' * ok}{'░' * (len(members) - ok)} {ok}/{len(members)}")
+        if detailed:
+            for row in members:
+                mark = BOX_MARKS.get(str(row.get("status")), BOX_MARKS["unavailable"])
+                block.append(f" {mark} {short_line(row)}")
     return "\n".join(block)
+
+
+BOX_MARKS = {"pass": "✓", "fail": "✗", "unavailable": "?"}
 
 
 def _decimal_or_none(raw: object) -> Decimal | None:
@@ -518,17 +531,10 @@ def quality_lines(
     cap = _decimal_or_none(market.get("market_cap_usd"))
     lines = [
         f"{icon} <b>{name}</b> — <b>{passed}/{total}</b> checks passed",
-        f"<pre>{escape(summary_block(mint, rows, cap, market))}</pre>",
+        f"<pre>{escape(summary_block(mint, rows, cap, market, detailed=True))}</pre>",
+        f"<i>{escape(QUALITY_RULE)}</i>",
+        f"<i>{QUALITY_NOTE}</i>",
     ]
-    for group, group_icon, title in QUALITY_GROUPS:
-        members = [row for row in rows if row.get("group") == group]
-        if not members:
-            continue
-        lines.extend(["", f"{group_icon} <b>{title}</b>"])
-        for row in members:
-            status_icon = QUALITY_STATUS_ICONS.get(str(row.get("status")), ICON_UNAVAILABLE)
-            lines.append(f"{status_icon} {escape(str(row.get('text', '')))}")
-    lines.extend(["", f"<i>{escape(QUALITY_RULE)}</i>", f"<i>{QUALITY_NOTE}</i>"])
     return lines
 
 
