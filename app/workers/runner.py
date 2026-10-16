@@ -18,11 +18,13 @@ from app.config import (
     AI_REVIEW_PROVIDER,
     ALERT_DISPATCH_INTERVAL_SECONDS,
     BAIT_POLL_INTERVAL_SECONDS,
+    CHANNEL_POLL_INTERVAL_SECONDS,
     DISCOVERY_QUALIFY_PRE_MIGRATION,
     DISCOVERY_REVIEW_INTERVAL_SECONDS,
     FAST_SCAN_CONCURRENCY,
     FUNDER_GRAPH_CONCURRENCY,
     HELIUS_DAILY_REQUEST_BUDGET,
+    MARKET_SAMPLE_INTERVAL_SECONDS,
     OUTCOME_POLL_INTERVAL_SECONDS,
     SIGNAL_FUSION_INTERVAL_SECONDS,
     get_settings,
@@ -31,6 +33,8 @@ from app.db.base import create_engine, create_sessionmaker
 from app.services.outcome_jobs import OutcomeWorker
 from app.workers.alert_dispatcher import AlertDispatcher
 from app.workers.bait_check_worker import BaitCheckWorker, detector_for_session
+from app.workers.channel_publisher import ChannelPublisher
+from app.workers.market_sampler import MarketSampler
 from app.workers.risk_scan_worker import PrebuiltClusters, RiskScanWorker
 from app.workers.signal_fusion import SignalFusion
 
@@ -264,12 +268,22 @@ async def serve(stop: asyncio.Event | None = None) -> None:
                 error_type=type(exc).__name__,
             )
 
+    sampler = MarketSampler(sessions, prices)
+
+    async def sample_once() -> None:
+        try:
+            await sampler.run_once()
+        except Exception as exc:
+            logger.warning("market_sample_cycle_failed", error_type=type(exc).__name__)
+
     async def alerts_loop() -> None:
         from app.adapters.telegram_bot import (
             PerChatRateLimiter,
             TelegramAlertSender,
+            TelegramChannelSender,
             admin_ids,
             build_application,
+            signal_link,
             telegram_configured,
         )
 
@@ -291,8 +305,28 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
         logger.info("telegram_polling_started")
+        loops = [poll_loop(stop, dispatcher.run_once, ALERT_DISPATCH_INTERVAL_SECONDS)]
+        channel = settings.public_channel_id.strip()
+        if channel:
+            username = application.bot.username
+            publisher = ChannelPublisher(
+                sessions,
+                TelegramChannelSender(application.bot, channel),
+                card_link=lambda signal: signal_link(username, signal.id) if username else None,
+            )
+
+            async def publish_once() -> None:
+                try:
+                    await publisher.run_once()
+                except Exception as exc:
+                    logger.warning("channel_cycle_failed", error_type=type(exc).__name__)
+
+            loops.append(poll_loop(stop, publish_once, CHANNEL_POLL_INTERVAL_SECONDS))
+            logger.info("channel_posting_enabled", channel=channel)
+        else:
+            logger.info("channel_posting_disabled")
         try:
-            await poll_loop(stop, dispatcher.run_once, ALERT_DISPATCH_INTERVAL_SECONDS)
+            await asyncio.gather(*loops)
         finally:
             await application.updater.stop()
             await application.stop()
@@ -308,6 +342,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             lambda: poll_loop(stop, review_once, DISCOVERY_REVIEW_INTERVAL_SECONDS),
             lambda: poll_loop(stop, bait.run_once, BAIT_POLL_INTERVAL_SECONDS),
             lambda: poll_loop(stop, outcomes.run_once, OUTCOME_POLL_INTERVAL_SECONDS),
+            lambda: poll_loop(stop, sample_once, MARKET_SAMPLE_INTERVAL_SECONDS),
             lambda: poll_loop(stop, fusion.run_once, SIGNAL_FUSION_INTERVAL_SECONDS),
             ai_review_loop,
             alerts_loop,

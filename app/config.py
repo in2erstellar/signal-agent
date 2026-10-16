@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
     # Comma-separated Telegram user ids. Empty means there are no admins.
     telegram_admin_ids: str = ""
+    # Public track-record channel, as @username or -100... id. Empty turns posting off.
+    public_channel_id: str = ""
     public_api_key: SecretStr = Field(default=SecretStr(""))
     api_rate_limit_per_minute: int = 60
     anthropic_api_key: SecretStr = Field(default=SecretStr(""))
@@ -206,6 +208,22 @@ RISK_HEAVY_GROUP = "risk_heavy_workers"
 BAIT_POLL_INTERVAL_SECONDS = 60
 SIGNAL_FUSION_INTERVAL_SECONDS = 30
 OUTCOME_POLL_INTERVAL_SECONDS = 60
+
+# Market-cap readings after a signal: (signal age up to, minutes between readings).
+MARKET_SAMPLE_SCHEDULE_MINUTES = ((60, 5), (24 * 60, 60), (7 * 24 * 60, 6 * 60))
+MARKET_SAMPLE_INTERVAL_SECONDS = 60
+# Result replies in the channel: (kind, minutes after the signal, how far back a
+# reading may be and still stand for that moment).
+CHANNEL_RESULT_HORIZONS = (("1h", 60, 10), ("24h", 24 * 60, 90), ("7d", 7 * 24 * 60, 7 * 60))
+# A reading at the signal must be this close to it to be the baseline.
+CHANNEL_BASELINE_MAX_MINUTES = 5
+# Past this, a result with no reading is recorded as skipped and not posted.
+CHANNEL_RESULT_GRACE_MINUTES = 120
+# Signals older than this when posting starts are not back-filled.
+CHANNEL_SIGNAL_MAX_AGE_MINUTES = 30
+# The first post waits this long for a market-cap reading, then goes out without one.
+CHANNEL_SIGNAL_WAIT_FOR_CAP_SECONDS = 120
+CHANNEL_POLL_INTERVAL_SECONDS = 20
 # One sorted set. The member suffix is the horizon. listing is not queued.
 OUTCOME_QUEUE = "signalforge:outcome:pending"
 OUTCOME_HORIZONS = (

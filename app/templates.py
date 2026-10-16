@@ -23,6 +23,8 @@ from app.config import (
     RISK_ICON_MED_MAX,
     SIGNAL_MAX_CREATOR_SHARE,
 )
+from app.services.ascii_chart import format_usd
+from app.services.channel_results import HorizonResult, verdict_icon
 from app.services.track_record import TrackRecord
 from app.ui_constants import (
     ICON_BAIT_WARNING,
@@ -71,6 +73,68 @@ QUALITY_RULE = (
 )
 QUALITY_NOTE = "Safety filter only. It does not predict price."
 HOW_CHECKS_BUTTON = "🔍 How checks work"
+CHANNEL_CARD_BUTTON = "🔍 Full checklist in the bot"
+
+
+def channel_signal_text(
+    *,
+    symbol: str | None,
+    mint: str,
+    passed: int,
+    total: int,
+    triggered_at: datetime,
+    market_cap: Decimal | None,
+) -> str:
+    """Short public post at the moment of the signal. Results follow as replies."""
+    icon = ICON_RISK_LOW if passed == total else ICON_RISK_MED
+    when = triggered_at.astimezone(timezone.utc).strftime("%H:%M UTC, %d %b")
+    cap = "" if market_cap is None else f" · MCap <b>{format_usd(market_cap)}</b>"
+    return "\n".join(
+        [
+            f"{icon} <b>{escape(symbol or 'no ticker')}</b> — {passed}/{total} checks passed",
+            f"Signal: {when}{cap}",
+            _code(mint),
+            "",
+            "Results follow as replies: 1h · 24h · 7d. Every signal, wins and losses.",
+            f"<i>{QUALITY_NOTE}</i>",
+        ]
+    )
+
+
+def channel_result_text(
+    *,
+    symbol: str | None,
+    horizon: str,
+    result: HorizonResult,
+) -> str:
+    change = _signed_percent(result.change)
+    lines = [
+        f"{verdict_icon(result.change)} <b>{escape(symbol or 'no ticker')}</b> · "
+        f"{horizon} after signal: <b>{change}</b>",
+        f"MCap {format_usd(result.base)} → {format_usd(result.end)}",
+    ]
+    if result.peak > result.base:
+        lines.append(
+            f"Peak {format_usd(result.peak)} ({_signed_percent(result.peak / result.base - 1)}) "
+            f"at {_duration(result.peak_minutes)}"
+        )
+    else:
+        lines.append("Never traded above the signal market cap.")
+    if result.chart:
+        lines.append(f"<pre>{escape(result.chart)}</pre>")
+    return "\n".join(lines)
+
+
+def _signed_percent(change: Decimal) -> str:
+    return f"{(change * 100).quantize(Decimal('1')):+}%"
+
+
+def _duration(minutes: float) -> str:
+    if minutes < 120:
+        return f"{int(round(minutes))}m"
+    if minutes < 48 * 60:
+        return f"{int(round(minutes / 60))}h"
+    return f"{round(minutes / (24 * 60), 1)}d"
 TRACK_RECORD_BUTTON = f"{ICON_STATUS} Track record"
 
 

@@ -15,6 +15,8 @@ import httpx
 
 REQUEST_TIMEOUT_SECONDS = 10.0
 SOLANA_CHAIN_ID = "solana"
+# The tokens endpoint takes at most this many comma-separated addresses.
+MAX_TOKENS_PER_REQUEST = 30
 
 
 class DexScreenerError(Exception):
@@ -34,6 +36,8 @@ class DexQuote:
     sells_5m: int | None = None
     # Links from a DexScreener token profile, when one was submitted.
     social_links: tuple[str, ...] = ()
+    # ``marketCap``, or ``fdv`` when the pair omits it.
+    market_cap_usd: Decimal | None = None
 
 
 class DexScreenerPrices:
@@ -55,16 +59,31 @@ class DexScreenerPrices:
 
     async def token_quote(self, mint: str) -> DexQuote | None:
         """``None`` when DexScreener lists no pair. HTTP failures raise ``DexScreenerError``."""
+        return _best_pair(await self._pairs([mint]), mint)
+
+    async def token_quotes(self, mints: list[str]) -> dict[str, DexQuote]:
+        """Best pair per mint, one request per 30 mints. Mints with no pair are left out."""
+        quotes: dict[str, DexQuote] = {}
+        for start in range(0, len(mints), MAX_TOKENS_PER_REQUEST):
+            chunk = mints[start : start + MAX_TOKENS_PER_REQUEST]
+            payload = await self._pairs(chunk)
+            for mint in chunk:
+                quote = _best_pair(payload, mint)
+                if quote is not None:
+                    quotes[mint] = quote
+        return quotes
+
+    async def _pairs(self, mints: list[str]) -> Any:
         try:
             response = await self._client.get(
-                f"{self._base_url}/tokens/v1/{SOLANA_CHAIN_ID}/{mint}",
+                f"{self._base_url}/tokens/v1/{SOLANA_CHAIN_ID}/{','.join(mints)}",
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
             raise DexScreenerError(f"DexScreener request failed: {type(exc).__name__}") from exc
         if response.status_code != 200:
             raise DexScreenerError(f"DexScreener lookup failed with HTTP {response.status_code}")
-        return _best_pair(response.json(), mint)
+        return response.json()
 
 
 def _best_pair(payload: Any, mint: str) -> DexQuote | None:
@@ -94,6 +113,8 @@ def _best_pair(payload: Any, mint: str) -> DexQuote | None:
                 buys_5m=buys,
                 sells_5m=sells,
                 social_links=_profile_links(pair.get("info")),
+                market_cap_usd=_positive_decimal(pair.get("marketCap"))
+                or _positive_decimal(pair.get("fdv")),
             )
         )
     if not quotes:

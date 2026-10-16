@@ -2,6 +2,7 @@
 
 from app.db.models.alerts import AlertDelivery
 from app.db.models.bait_detection import BaitFlag
+from app.db.models.channel import ChannelPost, MarketPoint
 from app.db.models.funder_graph import FunderCluster, WalletFunder
 from app.db.models.outcomes import LpUnlock, OutcomeCheck
 from app.db.models.signals import Signal
@@ -12,8 +13,10 @@ from app.db.models.wallets import TrackedWallet, WalletTx
 __all__ = [
     "AlertDelivery",
     "BaitFlag",
+    "ChannelPost",
     "FunderCluster",
     "LpUnlock",
+    "MarketPoint",
     "OutcomeCheck",
     "Signal",
     "Token",

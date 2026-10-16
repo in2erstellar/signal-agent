@@ -26,6 +26,7 @@ from telegram import (
     InlineKeyboardMarkup,
     LinkPreviewOptions,
     Message,
+    ReplyParameters,
     Update,
 )
 from telegram.ext import (
@@ -188,6 +189,40 @@ class TelegramAlertSender:
             link_preview_options=LinkPreviewOptions(is_disabled=True),
             reply_markup=checklist_markup(),
         )
+
+
+class TelegramChannelSender:
+    """Posts to the public channel. Returns the message id for replies."""
+
+    def __init__(self, bot: Any, chat_id: str) -> None:
+        self._bot = bot
+        self._chat_id = chat_id
+
+    async def post(
+        self,
+        text: str,
+        *,
+        reply_to: int | None = None,
+        link: tuple[str, str] | None = None,
+    ) -> int:
+        markup = (
+            None
+            if link is None
+            else InlineKeyboardMarkup([[InlineKeyboardButton(link[0], url=link[1])]])
+        )
+        message = await self._bot.send_message(
+            chat_id=self._chat_id,
+            text=text,
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            reply_parameters=(
+                None
+                if reply_to is None
+                else ReplyParameters(message_id=reply_to, allow_sending_without_reply=True)
+            ),
+            reply_markup=markup,
+        )
+        return int(message.message_id)
 
 
 def checklist_markup() -> InlineKeyboardMarkup:
@@ -418,11 +453,31 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         async with session.begin():
             row = await _register(session, user.id, _clock(context)(), admins=_admins(context))
             role = row.role
+    signal_id = parse_signal_link(context.args or [])
+    if signal_id is not None:
+        card = await _signal_card_text(context, signal_id, user.id)
+        if card is not None:
+            await _send(message, card, checklist_markup())
+            return
     if role == "admin":
         await _send(message, welcome_text())
     else:
         await _send(message, user_welcome_text())
     await _send_menu(message, admin=role == "admin")
+
+
+SIGNAL_LINK_PREFIX = "sig_"
+
+
+def signal_link(bot_username: str, signal_id: UUID) -> str:
+    """``t.me`` deep link that opens a stored signal card in the bot."""
+    return f"https://t.me/{bot_username}?start={SIGNAL_LINK_PREFIX}{signal_id.hex}"
+
+
+def parse_signal_link(args: list[str]) -> UUID | None:
+    if len(args) != 1 or not args[0].startswith(SIGNAL_LINK_PREFIX):
+        return None
+    return _parse_uuid(args[0][len(SIGNAL_LINK_PREFIX) :])
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -790,14 +845,31 @@ async def _show_signal(
     signal_id: UUID,
     page: int,
 ) -> bool:
+    viewer = query.from_user
+    text = await _signal_card_text(
+        context, signal_id, viewer.id if viewer is not None and isinstance(viewer.id, int) else None
+    )
+    if text is None:
+        return False
+    back = InlineKeyboardButton("◀️ Back", callback_data=f"s:page:{page}")
+    await _edit(query, text, InlineKeyboardMarkup([[back], [_menu_button()]]))
+    return True
+
+
+async def _signal_card_text(
+    context: ContextTypes.DEFAULT_TYPE,
+    signal_id: UUID,
+    viewer_id: int | None,
+) -> str | None:
+    """Stored card for one signal, or None when the signal or its token is gone."""
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
     async with sessions() as session:
         signal = await session.get(Signal, signal_id)
         if signal is None:
-            return False
+            return None
         token = await session.get(Token, signal.token_id)
         if token is None:
-            return False
+            return None
         bait_count = int(
             await session.scalar(
                 select(func.count()).select_from(BaitFlag).where(BaitFlag.token_id == token.id)
@@ -813,12 +885,11 @@ async def _show_signal(
         flags = [str(flag) for flag in raw_flags]
         stored = signal.context if isinstance(signal.context, dict) else None
         over_limit = False
-        viewer = query.from_user
-        if stored is not None and viewer is not None and isinstance(viewer.id, int):
-            prefs = await _prefs_for(context, viewer.id)
+        if stored is not None and viewer_id is not None:
+            prefs = await _prefs_for(context, viewer_id)
             if prefs is not None:
                 over_limit = share_above_limit(stored, prefs.max_dev_cluster_share)
-        text = risk_card_text(
+        return risk_card_text(
             symbol=symbol,
             mint=mint,
             risk_score=risk_score,
@@ -830,9 +901,6 @@ async def _show_signal(
             context=stored,
             creator_over_limit=over_limit,
         )
-    back = InlineKeyboardButton("◀️ Back", callback_data=f"s:page:{page}")
-    await _edit(query, text, InlineKeyboardMarkup([[back], [_menu_button()]]))
-    return True
 
 
 def _stored_review(token: Token) -> str | None:
