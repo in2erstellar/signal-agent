@@ -96,6 +96,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     from redis.asyncio import Redis
 
     from app.adapters.ai_review import AiReviewClient, ai_review_configured
+    from app.adapters.dexscreener import DexScreenerPrices
     from app.adapters.helius import HeliusClient
     from app.adapters.pumpportal import (
         DISCOVERY_DOWN_MESSAGE,
@@ -136,7 +137,8 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         budget=daily_budget(redis, daily_limit=HELIUS_DAILY_REQUEST_BUDGET),
     )
     raydium = RaydiumPools(settings.raydium_api_base_url)
-    facts = HeliusTokenSecurity(helius, raydium, PumpSwapPools(helius))
+    prices = DexScreenerPrices(settings.dexscreener_api_base_url)
+    facts = HeliusTokenSecurity(helius, raydium, PumpSwapPools(helius), prices)
     stop = stop or asyncio.Event()
     fast_slots = asyncio.Semaphore(FAST_SCAN_CONCURRENCY)
     graph_slots = asyncio.Semaphore(FUNDER_GRAPH_CONCURRENCY)
@@ -218,7 +220,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     moved = await risk.move_undelivered_post_migrations()
     logger.info("risk_scan_priority_backlog_moved", moved=moved)
     bait = BaitCheckWorker(sessions, redis, detector_factory, stop=stop)
-    outcomes = OutcomeWorker(sessions, redis, raydium, lp_custody=facts, stop=stop)
+    outcomes = OutcomeWorker(sessions, redis, facts, lp_custody=facts, stop=stop)
     fusion = SignalFusion(
         sessions,
         redis,
@@ -311,6 +313,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         await portal.close()
         await helius.aclose()
         await raydium.aclose()
+        await prices.aclose()
         await redis.aclose()
         await engine.dispose()
 

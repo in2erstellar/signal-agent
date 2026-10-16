@@ -4,6 +4,7 @@
 is no pool). ``1h``, ``24h``, and ``7d`` are the same kind of row, scored
 by due time. Only a pool that exists is followed up. A token that never
 leaves the bonding curve stays ``no_pool`` and is not polled forever.
+A pool seen without a price gets its ``listing`` row read once more later.
 
 The accuracy tracker is not published from these rows yet. The rows are
 already there so that tracker does not need a second queue.
@@ -22,6 +23,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.adapters.pumpswap import PumpSwapAccountError
 from app.adapters.raydium import PoolQuote, RaydiumError
 from app.config import OUTCOME_HORIZONS, OUTCOME_QUEUE
 from app.db.models import OutcomeCheck, Token
@@ -31,6 +33,10 @@ from app.workers.queues import score_for
 logger = structlog.get_logger(__name__)
 
 Clock = Callable[[], datetime]
+
+# DexScreener lists a PumpSwap pair one to three minutes after migration
+# (live check 2026-10-16), so a scan right after migration has no price yet.
+LISTING_RETRY_SECONDS = 180
 
 
 class PoolSource(Protocol):
@@ -47,7 +53,7 @@ def outcome_member(token_id: UUID, horizon: str) -> str:
 
 def parse_outcome_member(member: str) -> tuple[UUID, str] | None:
     token_text, separator, horizon = member.partition("|")
-    if not separator or horizon not in {name for name, _seconds in OUTCOME_HORIZONS}:
+    if not separator or horizon not in {"listing", *(name for name, _seconds in OUTCOME_HORIZONS)}:
         return None
     try:
         return UUID(token_text), horizon
@@ -56,7 +62,7 @@ def parse_outcome_member(member: str) -> tuple[UUID, str] | None:
 
 
 def quote_observation(quote: PoolQuote) -> tuple[str, Decimal | None, str | None]:
-    """Map one Raydium quote to status, price, reason. No silent zero price."""
+    """Map one pool quote to status, price, reason. No silent zero price."""
     if quote.lp_mint is None:
         return "unavailable", None, "no_pool"
     if quote.price_usd is None:
@@ -85,7 +91,9 @@ async def record_listing(
             scheduled_at=seen_at,
             observed_at=seen_at,
         )
-        logger.info("price_snapshot_unavailable", mint=token.mint, horizon="listing", reason="no_pool")
+        logger.info(
+            "price_snapshot_unavailable", mint=token.mint, horizon="listing", reason="no_pool"
+        )
         return
     if pool_status != "observed":
         await _upsert_check(
@@ -106,26 +114,37 @@ async def record_listing(
         )
         return
     if price_usd is None:
-        status, price, reason = "unavailable", None, "price_lookup_failed"
-        logger.warning(
-            "price_snapshot_unavailable",
+        retry_at = seen_at + timedelta(seconds=LISTING_RETRY_SECONDS)
+        await _upsert_check(
+            session,
+            token.id,
+            "listing",
+            status="pending",
+            price_usd=None,
+            price_reason=None,
+            scheduled_at=retry_at,
+            observed_at=None,
+        )
+        await session.flush()
+        await redis.zadd(OUTCOME_QUEUE, {outcome_member(token.id, "listing"): score_for(retry_at)})
+        logger.info(
+            "price_snapshot_deferred",
             mint=token.mint,
             horizon="listing",
-            reason="price_lookup_failed",
+            retry_in_seconds=LISTING_RETRY_SECONDS,
         )
     else:
-        status, price, reason = "observed", price_usd, None
+        await _upsert_check(
+            session,
+            token.id,
+            "listing",
+            status="observed",
+            price_usd=price_usd,
+            price_reason=None,
+            scheduled_at=seen_at,
+            observed_at=seen_at,
+        )
         logger.info("price_snapshot_observed", mint=token.mint, horizon="listing")
-    await _upsert_check(
-        session,
-        token.id,
-        "listing",
-        status=status,
-        price_usd=price,
-        price_reason=reason,
-        scheduled_at=seen_at,
-        observed_at=seen_at,
-    )
     for horizon, seconds in OUTCOME_HORIZONS:
         await _enqueue_followup(
             session,
@@ -218,7 +237,7 @@ class OutcomeWorker:
                     return True
                 try:
                     quote = await self._pools.pool_quote(token.mint)
-                except RaydiumError as exc:
+                except (RaydiumError, PumpSwapAccountError) as exc:
                     row.status = "unavailable"
                     row.price_reason = "price_lookup_failed"
                     row.observed_at = now

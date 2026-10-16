@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     helius_api_base_url: str = "https://api.helius.xyz"
     helius_rpc_url: str = "https://mainnet.helius-rpc.com"
     raydium_api_base_url: str = "https://api-v3.raydium.io"
+    dexscreener_api_base_url: str = "https://api.dexscreener.com"
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
     # Comma-separated Telegram user ids. Empty means there are no admins.
     telegram_admin_ids: str = ""
@@ -121,7 +122,12 @@ class Settings(BaseSettings):
             raise ValueError("AI_REVIEW_MODEL must not be empty")
         return stripped
 
-    @field_validator("helius_api_base_url", "helius_rpc_url", "raydium_api_base_url")
+    @field_validator(
+        "helius_api_base_url",
+        "helius_rpc_url",
+        "raydium_api_base_url",
+        "dexscreener_api_base_url",
+    )
     @classmethod
     def https_base_url(cls, value: str) -> str:
         if not value.startswith("https://"):

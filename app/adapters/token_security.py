@@ -12,6 +12,9 @@ owned by Raydium's Burn & Earn / LP Lock program. SPL ``burn`` that only
 shrinks supply is not visible in the holder rows. For PumpSwap the book also
 carries ``Pool.lp_supply`` (LP minted into the pool, not lowered by burns) so
 the scanner can count that burn; it is never used as the current supply.
+
+Raydium has no USD price for a PumpSwap pool, so price and liquidity for
+those come from DexScreener. A DexScreener failure leaves them null.
 """
 
 from __future__ import annotations
@@ -20,9 +23,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+import structlog
+
+from app.adapters.dexscreener import DexScreenerError, DexScreenerPrices
 from app.adapters.helius import HeliusClient, HeliusResponseError
 from app.adapters.pumpswap import PUMP_AMM_PROGRAM_ID, PumpSwapPools
-from app.adapters.raydium import RaydiumPools
+from app.adapters.raydium import PoolQuote, RaydiumPools
+
+logger = structlog.get_logger(__name__)
 
 # https://docs.raydium.io/reference/program-addresses (mainnet-beta).
 RAYDIUM_AMM_V4 = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
@@ -90,10 +98,12 @@ class HeliusTokenSecurity:
         helius: HeliusClient,
         raydium: RaydiumPools,
         pumpswap: PumpSwapPools | None = None,
+        prices: DexScreenerPrices | None = None,
     ) -> None:
         self._helius = helius
         self._raydium = raydium
         self._pumpswap = pumpswap
+        self._prices = prices
 
     async def mint_view(self, mint: str) -> MintView:
         return _mint_view(await self._parsed_account(mint))
@@ -131,19 +141,14 @@ class HeliusTokenSecurity:
         rows.sort(key=lambda row: row.amount_raw, reverse=True)
         return HolderBook(supply_raw=mint_view.supply_raw, rows=rows)
 
+    async def pool_quote(self, mint: str) -> PoolQuote:
+        """Raydium quote, or the canonical PumpSwap pool priced by DexScreener."""
+        quote, _original_supply = await self._resolve_pool(mint)
+        return quote
+
     async def lp_book(self, mint: str) -> LpBook:
-        quote = await self._raydium.pool_quote(mint)
-        lp_mint = quote.lp_mint
-        original_supply: int | None = None
-        if lp_mint is None and self._pumpswap is not None:
-            # None means the canonical account is absent (same as an empty
-            # Raydium list). A parse error propagates and is not "no pool".
-            # The mint account read below is the lock-check supply.
-            pool = await self._pumpswap.canonical_pool(mint)
-            if pool is not None:
-                lp_mint = pool.lp_mint
-                original_supply = pool.lp_supply
-        if lp_mint is None:
+        quote, original_supply = await self._resolve_pool(mint)
+        if quote.lp_mint is None:
             return LpBook(
                 lp_mint=None,
                 supply_raw=None,
@@ -151,7 +156,7 @@ class HeliusTokenSecurity:
                 liquidity_usd=quote.tvl_usd,
                 price_usd=quote.price_usd,
             )
-        custody = await self.lp_custody(lp_mint)
+        custody = await self.lp_custody(quote.lp_mint)
         return LpBook(
             lp_mint=custody.lp_mint,
             supply_raw=custody.supply_raw,
@@ -160,6 +165,35 @@ class HeliusTokenSecurity:
             price_usd=quote.price_usd,
             original_supply_raw=original_supply,
         )
+
+    async def _resolve_pool(self, mint: str) -> tuple[PoolQuote, int | None]:
+        quote = await self._raydium.pool_quote(mint)
+        if quote.lp_mint is not None or self._pumpswap is None:
+            return quote, None
+        # None means the canonical account is absent (same as an empty
+        # Raydium list). A parse error propagates and is not "no pool".
+        # The mint account read in lp_custody is the lock-check supply.
+        pool = await self._pumpswap.canonical_pool(mint)
+        if pool is None:
+            return quote, None
+        price_usd, liquidity_usd = await self._dex_reading(mint)
+        return (
+            PoolQuote(lp_mint=pool.lp_mint, tvl_usd=liquidity_usd, price_usd=price_usd),
+            pool.lp_supply,
+        )
+
+    async def _dex_reading(self, mint: str) -> tuple[Decimal | None, Decimal | None]:
+        if self._prices is None:
+            return None, None
+        try:
+            dex = await self._prices.token_quote(mint)
+        except DexScreenerError as exc:
+            logger.warning("dexscreener_quote_unavailable", mint=mint, error=str(exc))
+            return None, None
+        if dex is None:
+            logger.info("dexscreener_quote_unavailable", mint=mint, error="no_pair")
+            return None, None
+        return dex.price_usd, dex.liquidity_usd
 
     async def lp_custody(self, lp_mint: str) -> LpBook:
         """LP holder rows for a mint already known. Does not call Raydium."""

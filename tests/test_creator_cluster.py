@@ -365,6 +365,62 @@ async def test_one_hour_lock_reread_uses_the_quote_it_already_paid_for(
         await engine.dispose()
 
 
+async def test_listing_without_a_price_is_read_once_more_later(
+    pipeline_infra: object,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.services.outcome_jobs import LISTING_RETRY_SECONDS
+    from tests.pipeline_containers import truncate_pipeline
+
+    infra = pipeline_infra
+    engine = create_async_engine(infra.database_url)  # type: ignore[attr-defined]
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    await truncate_pipeline(engine)
+    redis = _Redis()
+    pools = _Pools(quote=PoolQuote("lp-mint", Decimal("10"), Decimal("0.75")))
+    try:
+        async with sessions() as session:
+            async with session.begin():
+                token = Token(mint="mint-late-price", first_seen_at=NOW)
+                session.add(token)
+                await session.flush()
+                await record_listing(
+                    session,
+                    redis,  # type: ignore[arg-type]
+                    token,
+                    pool_status="observed",
+                    price_usd=None,
+                    seen_at=NOW,
+                )
+                token_id = token.id
+        members = set(redis.scores[OUTCOME_QUEUE])
+        assert outcome_member(token_id, "listing") in members
+        assert outcome_member(token_id, "1h") in members
+        worker = OutcomeWorker(
+            sessions,
+            redis,  # type: ignore[arg-type]
+            pools,
+            lp_custody=_Custody(),
+            clock=lambda: NOW + timedelta(seconds=LISTING_RETRY_SECONDS + 1),
+        )
+        assert await worker.run_once() == (1, 0)
+        assert pools.calls == 1
+        async with sessions() as session:
+            row = await session.scalar(
+                select(OutcomeCheck).where(
+                    OutcomeCheck.token_id == token_id,
+                    OutcomeCheck.horizon == "listing",
+                )
+            )
+        assert row is not None
+        assert row.status == "observed"
+        assert row.price_usd == Decimal("0.75")
+    finally:
+        await truncate_pipeline(engine)
+        await engine.dispose()
+
+
 def test_over_limit_needs_a_measured_share() -> None:
     assert share_above_limit(
         {"distribution_status": "measured", "distribution_share": "0.40"},
