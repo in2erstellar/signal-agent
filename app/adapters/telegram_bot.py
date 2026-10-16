@@ -55,8 +55,12 @@ from app.services.dialog_state import clear_pending_input, get_pending_input, se
 from app.services.risk_scanner import unavailable_fields
 from app.services.subscriber_settings import ALERT_PRESETS, AlertPrefs, parse_settings, with_updates
 from app.services.token_store import AI_REVIEW_COMPLETED
+from app.services.track_record import load_track_record
 from app.templates import (
+    HOW_CHECKS_BUTTON,
+    TRACK_RECORD_BUTTON,
     admin_restricted_text,
+    checks_explained_text,
     data_incomplete_text,
     format_score,
     format_share,
@@ -70,6 +74,7 @@ from app.templates import (
     signals_text,
     stale_menu_text,
     status_text,
+    track_record_text,
     unregistered_text,
     unwatch_blocked_text,
     unwatch_confirm_text,
@@ -154,6 +159,7 @@ class AlertBot(Protocol):
         text: str,
         parse_mode: str,
         link_preview_options: LinkPreviewOptions,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> Any: ...
 
 
@@ -172,6 +178,27 @@ class TelegramAlertSender:
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
+
+    async def send_checklist(self, chat_id: int | str, text: str) -> None:
+        await self._limiter.wait(chat_id)
+        await self._bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            reply_markup=checklist_markup(),
+        )
+
+
+def checklist_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(HOW_CHECKS_BUTTON, callback_data="i:how"),
+                InlineKeyboardButton(TRACK_RECORD_BUTTON, callback_data="i:track"),
+            ]
+        ]
+    )
 
 
 def telegram_configured(token: str) -> bool:
@@ -196,7 +223,7 @@ def admin_ids(raw: str) -> frozenset[int]:
 
 
 AWAITING_WALLET = "awaiting_wallet_address"
-_CALLBACK_KINDS = frozenset({"m", "w", "s", "set"})
+_CALLBACK_KINDS = frozenset({"m", "w", "s", "set", "i"})
 
 
 def parse_callback(data: str) -> tuple[str, tuple[str, ...]] | None:
@@ -214,6 +241,8 @@ BOT_COMMANDS = (
     BotCommand("status", f"{ICON_STATUS} Alert status"),
     BotCommand("risk", f"{ICON_RISK} Stored scan for a mint"),
     BotCommand("help", f"{ICON_SIGNAL} How a card is read"),
+    BotCommand("checks", "🔍 How the 12 checks work"),
+    BotCommand("track", f"{ICON_STATUS} Results after past signals"),
     BotCommand("wallets", f"{ICON_WALLET} Watched wallets"),
     BotCommand("watch", f"{ICON_ADD} Add a wallet"),
     BotCommand("unwatch", f"{ICON_DELETE} Remove a wallet"),
@@ -239,6 +268,8 @@ def build_application(
     application.bot_data["redis"] = redis
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CommandHandler("checks", cmd_checks))
+    application.add_handler(CommandHandler("track", cmd_track))
     application.add_handler(CommandHandler("menu", cmd_menu))
     application.add_handler(CommandHandler("settings", cmd_settings))
     application.add_handler(CommandHandler("status", cmd_status))
@@ -401,6 +432,41 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _send(message, help_text())
 
 
+async def cmd_checks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await _send(message, checks_explained_text())
+
+
+async def cmd_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await _send(message, await _track_record_body(context))
+
+
+async def _track_record_body(context: ContextTypes.DEFAULT_TYPE) -> str:
+    sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
+    async with sessions() as session:
+        record = await load_track_record(session)
+    return track_record_text(record)
+
+
+async def _route_info(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: CallbackQuery,
+    rest: tuple[str, ...],
+) -> bool:
+    """Buttons under an alert. The answer is a new message so the card stays."""
+    message = query.message
+    if rest not in {("how",), ("track",)} or not isinstance(message, Message):
+        return False
+    text = checks_explained_text() if rest == ("how",) else await _track_record_body(context)
+    await _send(message, text)
+    return True
+
+
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     message = update.message
@@ -437,6 +503,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         handled = await _route_signal(context, query, rest)
     elif kind == "set":
         handled = await _route_settings(context, query, user.id, rest)
+    elif kind == "i":
+        handled = await _route_info(context, query, rest)
     if not handled:
         await _edit(query, stale_menu_text())
 

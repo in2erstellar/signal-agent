@@ -55,6 +55,10 @@ class MintView:
     mint_authority: str | None
     freeze_authority: str | None
     supply_raw: int
+    # Token-2022 only: ``(extension name, parsed state)`` as jsonParsed lists them.
+    extensions: tuple[tuple[str, dict[str, Any]], ...] = ()
+    # ``tokenMetadata.uri`` when the mint carries its own metadata.
+    metadata_uri: str | None = None
 
 
 @dataclass(frozen=True)
@@ -269,11 +273,28 @@ def _mint_view(account: dict[str, Any]) -> MintView:
     info = parsed.get("info") if isinstance(parsed, dict) else None
     if not isinstance(info, dict) or info.get("supply") is None:
         raise HeliusResponseError(200, "parsed mint account is missing supply")
+    extensions = _extensions(info.get("extensions"))
+    metadata = dict(extensions).get("tokenMetadata", {})
+    uri = metadata.get("uri")
     return MintView(
         mint_authority=_optional_address(info.get("mintAuthority")),
         freeze_authority=_optional_address(info.get("freezeAuthority")),
         supply_raw=int(info["supply"]),
+        extensions=extensions,
+        metadata_uri=uri if isinstance(uri, str) and uri else None,
     )
+
+
+def _extensions(raw: Any) -> tuple[tuple[str, dict[str, Any]], ...]:
+    if not isinstance(raw, list):
+        return ()
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("extension"), str):
+            continue
+        state = item.get("state")
+        rows.append((item["extension"], state if isinstance(state, dict) else {}))
+    return tuple(rows)
 
 
 def _optional_address(value: Any) -> str | None:

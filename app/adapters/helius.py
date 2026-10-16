@@ -81,6 +81,15 @@ class FundingDepthExceeded(HeliusError):
         )
 
 
+class HistoryTooLong(HeliusError):
+    """An address has more signatures than the caller allowed reading."""
+
+    def __init__(self, address: str, scanned: int) -> None:
+        self.address = address
+        self.scanned = scanned
+        super().__init__(f"history for {address} exceeded {scanned} signatures")
+
+
 class FundingSourceUnresolved(HeliusError):
     """The oldest transaction did not show a positive SOL inflow.
 
@@ -423,6 +432,30 @@ class HeliusClient:
         if not collected:
             return [], 0
         return list(reversed(collected)), len(collected)
+
+    async def earliest_signatures(
+        self,
+        address: str,
+        *,
+        max_signatures: int,
+    ) -> list[Mapping[str, Any]]:
+        """Every signature of ``address``, oldest first, or ``HistoryTooLong``.
+
+        Rows keep ``slot`` and ``err`` as the RPC returned them.
+        """
+        collected: list[Mapping[str, Any]] = []
+        before: str | None = None
+        while True:
+            config: dict[str, Any] = {"limit": _SIGNATURE_PAGE_LIMIT, "commitment": "confirmed"}
+            if before is not None:
+                config["before"] = before
+            page = _signature_rows(await self._call_rpc("getSignaturesForAddress", [address, config]))
+            collected.extend(page)
+            if len(page) < _SIGNATURE_PAGE_LIMIT:
+                return list(reversed(collected))
+            if len(collected) >= max_signatures:
+                raise HistoryTooLong(address, len(collected))
+            before = str(page[-1]["signature"])
 
     async def get_top_holder_owners(self, mint: str, top_n: int) -> list[str]:
         """Owner wallets of the largest token accounts, largest balance first.

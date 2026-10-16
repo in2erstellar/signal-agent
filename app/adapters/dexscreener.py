@@ -29,6 +29,11 @@ class DexQuote:
     dex_id: str | None
     price_usd: Decimal | None
     liquidity_usd: Decimal | None
+    # ``txns.m5``; None when the pair omits it.
+    buys_5m: int | None = None
+    sells_5m: int | None = None
+    # Links from a DexScreener token profile, when one was submitted.
+    social_links: tuple[str, ...] = ()
 
 
 class DexScreenerPrices:
@@ -77,6 +82,7 @@ def _best_pair(payload: Any, mint: str) -> DexQuote | None:
             continue
         liquidity = pair.get("liquidity")
         dex_id = pair.get("dexId")
+        buys, sells = _five_minute_trades(pair.get("txns"))
         quotes.append(
             DexQuote(
                 pair_address=address,
@@ -85,11 +91,39 @@ def _best_pair(payload: Any, mint: str) -> DexQuote | None:
                 liquidity_usd=_positive_decimal(
                     liquidity.get("usd") if isinstance(liquidity, dict) else None
                 ),
+                buys_5m=buys,
+                sells_5m=sells,
+                social_links=_profile_links(pair.get("info")),
             )
         )
     if not quotes:
         return None
     return max(quotes, key=lambda quote: quote.liquidity_usd or Decimal(0))
+
+
+def _five_minute_trades(raw: object) -> tuple[int | None, int | None]:
+    window = raw.get("m5") if isinstance(raw, dict) else None
+    if not isinstance(window, dict):
+        return None, None
+    return _count(window.get("buys")), _count(window.get("sells"))
+
+
+def _count(raw: object) -> int | None:
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return None
+    return raw
+
+
+def _profile_links(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, dict):
+        return ()
+    links: list[str] = []
+    for key in ("websites", "socials"):
+        for item in raw.get(key) or []:
+            url = item.get("url") if isinstance(item, dict) else None
+            if isinstance(url, str) and url:
+                links.append(url)
+    return tuple(links)
 
 
 def _positive_decimal(raw: object) -> Decimal | None:

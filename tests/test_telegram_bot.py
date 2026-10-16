@@ -342,7 +342,7 @@ async def test_alert_text_shows_the_score_the_mint_link_and_the_bait_warning() -
         bait_warning=True,
     )
     assert "<b>BONK</b>" in text
-    assert "<b><code>72.5</code></b>" in text
+    assert "Signal score" not in text
     assert f"https://solscan.io/token/{mint}" in text
     assert f"<code>{mint}</code>" in text
     assert ">Solscan</a>" in text
@@ -386,7 +386,7 @@ def test_alert_card_groups_ready_data_without_rewriting_reasons() -> None:
     assert f"<code>{mint}</code>" in text
     assert ">Solscan</a>" in text
     assert "https://solscan.io/token/" in text
-    assert "<code>72.5</code>" in text
+    assert "72.5" not in text
     assert "<code>60</code>" in text
     assert "👤 <b>Creator cluster</b>" in text
     assert "<code>Wallet&lt;A&gt;&amp;B</code>" in text

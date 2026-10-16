@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     helius_rpc_url: str = "https://mainnet.helius-rpc.com"
     raydium_api_base_url: str = "https://api-v3.raydium.io"
     dexscreener_api_base_url: str = "https://api.dexscreener.com"
+    # ipfs.io answers server requests with a Cloudflare challenge and 4everland
+    # redirects to a subdomain (2026-10-16); filebase serves the JSON directly.
+    metadata_ipfs_gateway: str = "https://ipfs.filebase.io/ipfs"
     telegram_bot_token: SecretStr = Field(default=SecretStr(""))
     # Comma-separated Telegram user ids. Empty means there are no admins.
     telegram_admin_ids: str = ""
@@ -127,6 +130,7 @@ class Settings(BaseSettings):
         "helius_rpc_url",
         "raydium_api_base_url",
         "dexscreener_api_base_url",
+        "metadata_ipfs_gateway",
     )
     @classmethod
     def https_base_url(cls, value: str) -> str:
@@ -226,6 +230,22 @@ SIGNAL_THRESHOLD = Decimal("50")
 # the signal. The per-user max_dev_cluster_share only adds a warning line; a
 # live signal went out green with 79% on the creator's root.
 SIGNAL_MAX_CREATOR_SHARE = Decimal("0.30")
+
+# The 12-line checklist on a signal card. Thresholds are hand-picked starting
+# values, printed on the card next to each reading. Unavailable is not a pass.
+QUALITY_REQUIRED_CHECKS = ("mint_authority", "freeze_authority", "lp_locked", "creator_share")
+QUALITY_MIN_PASSED = 9
+QUALITY_MIN_LIQUIDITY_USD = Decimal("10000")
+# Curve transactions in the creation slot and the next one, the create excluded.
+QUALITY_LAUNCH_SLOTS = 2
+QUALITY_MAX_LAUNCH_TRADES = 3
+# A graduated curve has a few thousand signatures; past this it is unavailable.
+QUALITY_MAX_CURVE_SIGNATURES = 8000
+QUALITY_CLONE_WINDOW_HOURS = 24
+# External readings are retried this many fusion cycles, then the card goes out
+# (or not) with what came back.
+QUALITY_MAX_ATTEMPTS = 3
+QUALITY_STATE_TTL_SECONDS = 3600
 
 # Alert fan-out. min_score is a floor on composite_score.
 # max_risk is a ceiling on (100 - risk_score): a higher value admits more tokens.

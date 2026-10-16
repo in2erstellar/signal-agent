@@ -12,14 +12,25 @@ from html import escape
 from app.config import (
     DEFAULT_MAX_DEV_CLUSTER_SHARE,
     FOOTER_DISCLAIMER,
+    HOLDER_CONCENTRATION_MAX_SHARE,
+    LP_LOCKED_MIN_SHARE,
+    QUALITY_CLONE_WINDOW_HOURS,
+    QUALITY_LAUNCH_SLOTS,
+    QUALITY_MAX_LAUNCH_TRADES,
+    QUALITY_MIN_LIQUIDITY_USD,
+    QUALITY_MIN_PASSED,
     RISK_ICON_LOW_MAX,
     RISK_ICON_MED_MAX,
+    SIGNAL_MAX_CREATOR_SHARE,
 )
+from app.services.track_record import TrackRecord
 from app.ui_constants import (
     ICON_BAIT_WARNING,
     ICON_CANCEL,
+    ICON_CONFIRM,
     ICON_CREATOR,
     ICON_DISTRIBUTION,
+    ICON_HOLDERS,
     ICON_LP_LOCKED,
     ICON_LP_PENDING,
     ICON_LP_UNLOCKED,
@@ -45,6 +56,106 @@ STORED_SCAN_NOTE = (
 # risk_score is the sum of weights of passed checks, so higher is better. The
 # old "risk_score" label read as "more risk" to users and to the AI review.
 CHECKS_PASSED_LABEL = "Checks passed"
+
+QUALITY_KEYS = ("quality_checks", "quality_passed", "quality_total")
+QUALITY_GROUPS = (
+    ("contract", ICON_LP_LOCKED, "Contract"),
+    ("holders", ICON_CREATOR, "Holders"),
+    ("market", ICON_HOLDERS, "Market"),
+)
+QUALITY_STATUS_ICONS = {"pass": ICON_CONFIRM, "fail": ICON_CANCEL, "unavailable": ICON_UNAVAILABLE}
+QUALITY_RULE = (
+    "Rule: mint, freeze, LP, and creator share must pass, "
+    f"and at least {QUALITY_MIN_PASSED} of 12 lines overall. "
+    f"{ICON_UNAVAILABLE} means no data and counts as not passed."
+)
+QUALITY_NOTE = "Safety filter only. It does not predict price."
+HOW_CHECKS_BUTTON = "🔍 How checks work"
+TRACK_RECORD_BUTTON = f"{ICON_STATUS} Track record"
+
+
+def checks_explained_text() -> str:
+    holders = _share_text(HOLDER_CONCENTRATION_MAX_SHARE)
+    lp = _share_text(LP_LOCKED_MIN_SHARE)
+    liquidity = f"${QUALITY_MIN_LIQUIDITY_USD:,.0f}"
+    return "\n".join(
+        [
+            "🔍 <b>How checks work</b>",
+            "",
+            "Each line is checked on its own. "
+            f"{ICON_CONFIRM} passed, {ICON_CANCEL} failed, {ICON_UNAVAILABLE} no data. "
+            "No data never counts as passed.",
+            "",
+            f"{ICON_LP_LOCKED} <b>Contract</b>",
+            "• <b>Mint authority</b>: nobody can print more tokens. Required.",
+            "• <b>Freeze authority</b>: nobody can freeze your wallet. Required.",
+            f"• <b>LP</b>: at least {lp} of pool LP is burned or locked, so the pool "
+            "cannot be pulled. Required.",
+            "• <b>Token extensions</b>: no transfer fee, transfer hook, permanent "
+            "delegate, or pause switch.",
+            "",
+            f"{ICON_CREATOR} <b>Holders</b>",
+            f"• <b>Top-10 holders</b> own at most {holders}, pool excluded.",
+            "• <b>Funder cluster</b>: top holders were not all funded by one wallet.",
+            "• <b>Creator share</b>: creator and wallets funded by the same source own "
+            f"at most {_share_text(SIGNAL_MAX_CREATOR_SHARE)}. Required.",
+            f"• <b>Launch trades</b>: at most {QUALITY_MAX_LAUNCH_TRADES} trades in the "
+            f"first {QUALITY_LAUNCH_SLOTS} blocks. More usually means bundled snipers.",
+            "",
+            f"{ICON_HOLDERS} <b>Market</b> (DexScreener at the moment of the signal)",
+            f"• <b>Liquidity</b> of at least {liquidity}.",
+            "• <b>Buys over sells</b> in the last 5 minutes.",
+            f"• <b>Unique ticker</b>: no other token with the same ticker in "
+            f"{QUALITY_CLONE_WINDOW_HOURS}h.",
+            "• <b>Socials listed</b> in the token metadata. Not verified: anyone can "
+            "paste a famous account.",
+            "",
+            f"<b>Signal rule</b>: every required line passes and at least "
+            f"{QUALITY_MIN_PASSED} of 12 lines pass.",
+            "Thresholds are hand-picked starting values and may change once the "
+            "track record shows which lines matter.",
+            "",
+            f"<i>{QUALITY_NOTE} Most memecoins lose most of their value.</i>",
+        ]
+    )
+
+
+def track_record_text(record: TrackRecord) -> str:
+    lines = [f"{ICON_STATUS} <b>Track record</b>", ""]
+    if record.signals == 0:
+        lines.append("No signals yet.")
+        return "\n".join(lines)
+    since = (
+        record.first_signal_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        if record.first_signal_at is not None
+        else "unknown"
+    )
+    lines.append(f"Signals sent: {_code(record.signals)} (since {since})")
+    lines.append(
+        "Change is measured from the price at the signal. Signals without both "
+        "prices are left out, not counted."
+    )
+    lines.append("")
+    for stats in record.horizons:
+        label = f"After {stats.horizon}"
+        if stats.measured == 0:
+            lines.append(f"{ICON_UNAVAILABLE} {label}: not measured yet")
+            continue
+        change = (
+            "—"
+            if stats.median_change is None
+            else f"{(stats.median_change * 100).quantize(Decimal('1')):+}%"
+        )
+        lines.append(
+            f"<b>{label}</b>: {stats.measured} measured · "
+            f"{stats.collapsed} fell 90%+ · {stats.doubled} doubled · median {change}"
+        )
+    lines.extend(["", "<i>Past results do not predict future ones.</i>"])
+    return "\n".join(lines)
+
+
+def _share_text(share: Decimal) -> str:
+    return f"{(share * Decimal(100)).quantize(Decimal('1'))}%"
 
 
 def welcome_text() -> str:
@@ -223,6 +334,8 @@ def help_text() -> str:
         "\n"
         f"{ICON_SETTINGS} /settings — score floor, risk cap, creator-funder limit\n"
         f"{ICON_SIGNAL} /signals — latest signals\n"
+        "🔍 /checks — how the 12 checks work\n"
+        f"{ICON_STATUS} /track — what happened after past signals\n"
         f"{ICON_STATUS} /status — alerts, floors, and the last 24 hours\n"
         f"{ICON_RISK} /risk mint — stored scan\n"
         f"{ICON_WALLET} /wallets — watched wallets\n"
@@ -242,6 +355,18 @@ def alert_text(
     context: dict[str, object] | None = None,
     creator_over_limit: bool = False,
 ) -> str:
+    checklist = quality_lines(context, symbol=symbol)
+    if checklist is not None:
+        lines = [checklist[0], solscan_token(mint), *checklist[1:]]
+        return "\n".join(
+            _checklist_tail(
+                lines,
+                context=context,
+                bait_warning=bait_warning,
+                creator_over_limit=creator_over_limit,
+                ai_review=ai_review,
+            )
+        )
     risk = "—" if risk_score is None else format_score(risk_score)
     other_flags, lp_flags = _split_lp_flags(risk_flags)
     lines = [
@@ -249,7 +374,6 @@ def alert_text(
         solscan_token(mint),
         "",
         ICON_SECTION,
-        f"Signal score: <b>{_code(format_score(composite_score))}</b>",
         f"{CHECKS_PASSED_LABEL}: {_code(risk)}/100",
         *_flag_block("risk_flags", other_flags, lp_flags),
     ]
@@ -261,6 +385,55 @@ def alert_text(
     lines.extend(_review_lines(ai_review))
     lines.extend(["", DISCLAIMER])
     return "\n".join(lines)
+
+
+def quality_lines(context: dict[str, object] | None, *, symbol: str | None) -> list[str] | None:
+    """Header plus grouped checklist lines, or None for a signal stored before it."""
+    raw = context.get("quality_checks") if isinstance(context, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return None
+    rows = [row for row in raw if isinstance(row, dict)]
+    passed = sum(1 for row in rows if row.get("status") == "pass")
+    total = len(rows)
+    icon = ICON_RISK_LOW if passed == total else ICON_RISK_MED
+    name = escape(symbol or "no ticker")
+    lines = [f"{icon} <b>{name}</b> — <b>{passed}/{total}</b> checks passed"]
+    for group, group_icon, title in QUALITY_GROUPS:
+        members = [row for row in rows if row.get("group") == group]
+        if not members:
+            continue
+        lines.extend(["", f"{group_icon} <b>{title}</b>"])
+        for row in members:
+            status_icon = QUALITY_STATUS_ICONS.get(str(row.get("status")), ICON_UNAVAILABLE)
+            lines.append(f"{status_icon} {escape(str(row.get('text', '')))}")
+    lines.extend(["", f"<i>{escape(QUALITY_RULE)}</i>", f"<i>{QUALITY_NOTE}</i>"])
+    return lines
+
+
+def creator_context(context: dict[str, object] | None) -> dict[str, object] | None:
+    """The stored context without the checklist keys, or None when nothing is left."""
+    if not isinstance(context, dict):
+        return None
+    rest = {key: value for key, value in context.items() if key not in QUALITY_KEYS}
+    return rest or None
+
+
+def _checklist_tail(
+    lines: list[str],
+    *,
+    context: dict[str, object] | None,
+    bait_warning: bool,
+    creator_over_limit: bool,
+    ai_review: str | None,
+) -> list[str]:
+    if bait_warning:
+        lines.extend(["", f"<b>{BAIT_WARNING}</b>"])
+    creator = creator_context(context)
+    if creator is not None and creator.get("creator"):
+        lines.extend(["", ICON_SECTION, creator_block_text(creator, over_limit=creator_over_limit)])
+    lines.extend(_review_lines(ai_review))
+    lines.extend(["", DISCLAIMER])
+    return lines
 
 
 def _distribution_line(context: dict[str, object]) -> str:
@@ -287,6 +460,22 @@ def risk_card_text(
     context: dict[str, object] | None = None,
     creator_over_limit: bool = False,
 ) -> str:
+    checklist = quality_lines(context, symbol=symbol)
+    if checklist is not None:
+        lines = [checklist[0], solscan_token(mint)]
+        if triggered_at is not None:
+            when = triggered_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            lines.append(f"Signal sent {_code(when)}. Lines are as of that moment.")
+        lines.extend(checklist[1:])
+        return "\n".join(
+            _checklist_tail(
+                lines,
+                context=context,
+                bait_warning=bait_warning,
+                creator_over_limit=creator_over_limit,
+                ai_review=ai_review,
+            )
+        )
     risk = "—" if risk_score is None else format_score(risk_score)
     other_flags, lp_flags = _split_lp_flags(flags)
     lines = [
@@ -295,8 +484,6 @@ def risk_card_text(
         "",
         ICON_SECTION,
     ]
-    if composite_score is not None:
-        lines.append(f"composite_score: <b>{_code(format_score(composite_score))}</b>")
     if triggered_at is not None:
         when = triggered_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines.append(_code(when))

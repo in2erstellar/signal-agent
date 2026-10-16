@@ -41,6 +41,10 @@ class AlertSender(Protocol):
     async def send(self, chat_id: int | str, text: str) -> None: ...
 
 
+class ChecklistAlertSender(AlertSender, Protocol):
+    async def send_checklist(self, chat_id: int | str, text: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class _Recipient:
     user_id: UUID
@@ -178,7 +182,11 @@ class AlertDispatcher:
         failed = 0
         delivered: list[UUID] = []
         deactivated: list[UUID] = []
-        missing = unavailable_fields(snapshot.risk_flags)
+        # A checklist card prints unavailable lines itself, so it is not replaced.
+        has_checklist = isinstance(snapshot.context, dict) and bool(
+            snapshot.context.get("quality_checks")
+        )
+        missing = [] if has_checklist else unavailable_fields(snapshot.risk_flags)
         if missing:
             logger.warning(
                 "alert_data_incomplete",
@@ -206,7 +214,11 @@ class AlertDispatcher:
                         ),
                     )
                 try:
-                    await self._sender.send(recipient.telegram_id, text)
+                    if has_checklist and hasattr(self._sender, "send_checklist"):
+                        # Same message plus the "how checks work" and track-record buttons.
+                        await self._sender.send_checklist(recipient.telegram_id, text)
+                    else:
+                        await self._sender.send(recipient.telegram_id, text)
                 except Forbidden:
                     deactivated.append(recipient.user_id)
                     logger.info(

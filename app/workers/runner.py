@@ -108,9 +108,11 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     )
     from app.adapters.pumpswap import PumpSwapPools
     from app.adapters.raydium import RaydiumPools
+    from app.adapters.token_metadata import TokenMetadataClient
     from app.adapters.token_security import HeliusTokenSecurity
     from app.services.funder_graph import FunderGraphBuilder
     from app.services.helius_budget import daily_budget
+    from app.services.quality_inputs import QualityReader
     from app.services.risk_scanner import RiskScanner
     from app.services.startup_checks import assert_worker_ready
     from app.workers.ai_review_worker import AiReviewWorker
@@ -139,6 +141,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     raydium = RaydiumPools(settings.raydium_api_base_url)
     prices = DexScreenerPrices(settings.dexscreener_api_base_url)
     facts = HeliusTokenSecurity(helius, raydium, PumpSwapPools(helius), prices)
+    metadata = TokenMetadataClient(settings.metadata_ipfs_gateway)
     stop = stop or asyncio.Event()
     fast_slots = asyncio.Semaphore(FAST_SCAN_CONCURRENCY)
     graph_slots = asyncio.Semaphore(FUNDER_GRAPH_CONCURRENCY)
@@ -226,6 +229,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         redis,
         reviews_enabled=ai_review_configured(settings),
         stop=stop,
+        quality=QualityReader(prices, facts, helius, metadata),
     )
     ai_reviews = AiReviewWorker(sessions, redis, reviews, stop=stop)
 
@@ -314,6 +318,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         await helius.aclose()
         await raydium.aclose()
         await prices.aclose()
+        await metadata.aclose()
         await redis.aclose()
         await engine.dispose()
 

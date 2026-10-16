@@ -11,6 +11,13 @@ would cap a perfect scan at 50, which does not clear the threshold.
 mint. A composite equal to ``SIGNAL_THRESHOLD`` does not create a row. The
 scan must be newer than ``SIGNAL_RISK_SCAN_MAX_AGE_MINUTES``. One signal
 per token is enforced by ``uq_signals_token_id``.
+
+With a ``QualityReader`` (the live worker always has one) the 12-line
+checklist in ``app.services.quality_checks`` decides instead: the required
+lines must pass and enough lines in total must pass. ``composite_score`` is
+then the share of passed lines on a 0-100 scale, and the lines are stored in
+``signals.context["quality_checks"]`` for the card. Without a reader the
+composite rule above still applies.
 """
 
 from __future__ import annotations
@@ -30,6 +37,10 @@ from app import config
 from app.adapters.ai_review import TokenReviewInput, estimate_review_tokens
 from app.config import (
     AI_REVIEW_QUEUE,
+    QUALITY_CLONE_WINDOW_HOURS,
+    QUALITY_MAX_ATTEMPTS,
+    QUALITY_MIN_PASSED,
+    QUALITY_STATE_TTL_SECONDS,
     SIGNAL_BAIT_WEIGHT,
     SIGNAL_MAX_CREATOR_SHARE,
     SIGNAL_RISK_SCAN_MAX_AGE_MINUTES,
@@ -41,6 +52,15 @@ from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace
 from app.services.ai_budget import release_review, reserve_review, review_counts, tokens_used
 from app.services.creator_cluster import load_creator_context, share_above_limit
+from app.services.quality_checks import (
+    ExternalReadings,
+    QualityCheck,
+    QualityVerdict,
+    best_possible,
+    build_checklist,
+    verdict,
+)
+from app.services.quality_inputs import QualityReader
 from app.services.risk_scanner import unavailable_fields
 from app.services.token_store import AI_REVIEW_COMPLETED, AI_REVIEW_PENDING, AI_REVIEW_TRUNCATED
 
@@ -173,9 +193,11 @@ class SignalFusion:
         reviews_enabled: bool = False,
         clock: Clock | None = None,
         stop: Any | None = None,
+        quality: QualityReader | None = None,
     ) -> None:
         self._sessions = sessions
         self._redis = redis
+        self._quality = quality
         self._reviews_enabled = reviews_enabled and redis is not None
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._stop = stop
@@ -222,6 +244,107 @@ class SignalFusion:
         return processed, failed, created
 
     async def _consider(self, session: AsyncSession, token: Token, now: datetime) -> bool:
+        if self._quality is not None:
+            return await self._consider_checklist(session, token, now, self._quality)
+        return await self._consider_composite(session, token, now)
+
+    async def _consider_checklist(
+        self,
+        session: AsyncSession,
+        token: Token,
+        now: datetime,
+        reader: QualityReader,
+    ) -> bool:
+        context = await load_creator_context(session, token)
+        clone_count = await _clone_count(session, token, now)
+
+        def checklist(readings: ExternalReadings) -> list[QualityCheck]:
+            return build_checklist(
+                risk_flags=token.risk_flags,
+                creator_context=context,
+                clone_count=clone_count,
+                symbol=token.symbol,
+                readings=readings,
+            )
+
+        stored_only = checklist(ExternalReadings())
+        early = verdict(stored_only)
+        if early.required_failed or best_possible(stored_only) < QUALITY_MIN_PASSED:
+            self._log_rejected(token, early, stage="stored_scan")
+            return False
+        if not await self._quality_attempt(token):
+            return False
+        readings = await reader.read(token)
+        checks = checklist(readings)
+        result = verdict(checks)
+        if not result.emits:
+            if readings.complete:
+                await self._quality_done(token)
+            self._log_rejected(token, result, stage="full")
+            return False
+        await self._quality_done(token)
+        win_rates = await self._win_rates(session, token)
+        wallet_score = (
+            wallet_score_from_win_rates(win_rates) if wallet_history_known(win_rates) else None
+        )
+        stored_context: dict[str, Any] = dict(context or {})
+        stored_context["quality_checks"] = [check.as_dict() for check in checks]
+        stored_context["quality_passed"] = result.passed
+        stored_context["quality_total"] = result.total
+        return await self._insert_signal(
+            session,
+            token,
+            now,
+            score=result.score,
+            risk=token.risk_score if token.risk_score is not None else Decimal(0),
+            wallet_score=wallet_score,
+            context=stored_context,
+            penalty=0,
+        )
+
+    def _log_rejected(self, token: Token, result: QualityVerdict, *, stage: str) -> None:
+        with bind_trace(token.trace_id):
+            logger.info(
+                "signal_checklist_rejected",
+                mint=token.mint,
+                stage=stage,
+                passed=result.passed,
+                total=result.total,
+                required_failed=list(result.required_failed),
+            )
+
+    async def _quality_attempt(self, token: Token) -> bool:
+        """False once this token's checklist is settled or out of retries."""
+        redis = self._redis
+        if redis is None:
+            return True
+        if await redis.exists(_quality_done_key(token)):
+            return False
+        key = f"quality:attempts:{token.id}"
+        attempts = int(await redis.incr(key))
+        await redis.expire(key, QUALITY_STATE_TTL_SECONDS)
+        if attempts >= QUALITY_MAX_ATTEMPTS:
+            await self._quality_done(token)
+        return attempts <= QUALITY_MAX_ATTEMPTS
+
+    async def _quality_done(self, token: Token) -> None:
+        if self._redis is not None:
+            await self._redis.set(_quality_done_key(token), "1", ex=QUALITY_STATE_TTL_SECONDS)
+
+    async def _win_rates(self, session: AsyncSession, token: Token) -> list[Decimal | None]:
+        return [
+            rate
+            for _wallet_id, rate in (
+                await session.execute(
+                    select(TrackedWallet.id, TrackedWallet.win_rate)
+                    .join(WalletTx, WalletTx.wallet_id == TrackedWallet.id)
+                    .where(WalletTx.token_id == token.id, WalletTx.action == "buy")
+                    .distinct()
+                )
+            ).all()
+        ]
+
+    async def _consider_composite(self, session: AsyncSession, token: Token, now: datetime) -> bool:
         win_rates = [
             rate
             for _wallet_id, rate in (
@@ -286,6 +409,29 @@ class SignalFusion:
                     limit=str(SIGNAL_MAX_CREATOR_SHARE),
                 )
             return False
+        return await self._insert_signal(
+            session,
+            token,
+            now,
+            score=score,
+            risk=risk,
+            wallet_score=wallet_score,
+            context=context,
+            penalty=penalty,
+        )
+
+    async def _insert_signal(
+        self,
+        session: AsyncSession,
+        token: Token,
+        now: datetime,
+        *,
+        score: Decimal,
+        risk: Decimal,
+        wallet_score: Decimal | None,
+        context: dict[str, Any] | None,
+        penalty: object,
+    ) -> bool:
         inserted_id = await session.scalar(
             pg_insert(Signal)
             .values(
@@ -367,6 +513,25 @@ class SignalFusion:
             token.ai_review_status = None
             raise
         logger.info("ai_review_enqueued", mint=token.mint, trace_id=token.trace_id)
+
+
+def _quality_done_key(token: Token) -> str:
+    return f"quality:done:{token.id}"
+
+
+async def _clone_count(session: AsyncSession, token: Token, now: datetime) -> int | None:
+    """Other tokens first seen in the window with the same ticker, case ignored."""
+    if not token.symbol or not token.symbol.strip():
+        return None
+    since = now - timedelta(hours=QUALITY_CLONE_WINDOW_HOURS)
+    count = await session.scalar(
+        select(func.count(Token.id)).where(
+            func.lower(func.trim(Token.symbol)) == token.symbol.strip().lower(),
+            Token.id != token.id,
+            Token.first_seen_at >= since,
+        )
+    )
+    return int(count or 0)
 
 
 def _review_input(token: Token, score: Decimal) -> TokenReviewInput:

@@ -256,7 +256,7 @@ async def test_signals_page_and_open_the_bait_card(sessions: object) -> None:
     body = card.callback_query.edit_message_text.await_args.args[0]
     assert "🔴" in body
     assert "<b>BAIT</b>" in body
-    assert "72.5" in body
+    assert "composite_score" not in body
     assert f"<b>{BAIT_WARNING}</b>" in body
     assert body.endswith(DISCLAIMER)
     assert "https://solscan.io/token/" in body

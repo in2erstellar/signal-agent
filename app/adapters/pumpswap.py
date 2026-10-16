@@ -100,6 +100,15 @@ class PumpSwapReserves:
     quote_raw: int
 
 
+def bonding_curve_address(mint: str) -> str:
+    """PDA of the pump.fun bonding curve for ``mint``."""
+    address, _bump = Pubkey.find_program_address(
+        [b"bonding-curve", bytes(Pubkey.from_string(mint))],
+        Pubkey.from_string(PUMP_PROGRAM_ID),
+    )
+    return str(address)
+
+
 def canonical_pool_address(mint: str) -> str:
     """PDA of the index-0 WSOL pool created by pump.fun ``migrate``."""
     mint_key = Pubkey.from_string(mint)
