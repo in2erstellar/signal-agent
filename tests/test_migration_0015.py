@@ -115,7 +115,7 @@ async def _columns(url: str, table: str) -> set[str]:
 
 
 def test_readme_rollback_stops_the_worker_before_downgrade() -> None:
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = (ROOT / "docs" / "operations.ru.md").read_text(encoding="utf-8")
     rollback = readme.split("## Откат ревизии 0015", 1)[1]
     stop = rollback.index("stop worker")
     delete = rollback.index("DEL signalforge:outcome:pending")
