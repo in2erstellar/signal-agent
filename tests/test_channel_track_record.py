@@ -100,28 +100,58 @@ def test_deep_link_round_trip() -> None:
 
 
 def test_channel_texts() -> None:
+    groups = ["contract"] * 4 + ["holders"] * 4 + ["market"] * 4
+    statuses = ["pass"] * 4 + ["pass", "fail", "pass", "fail"] + ["pass", "pass", "fail", "pass"]
+    checks = [{"group": g, "status": s, "text": "x"} for g, s in zip(groups, statuses, strict=True)]
     first = channel_signal_text(
         symbol="TWMW<",
         mint=MINT,
-        passed=9,
-        total=12,
+        checks=checks,
         triggered_at=T0,
         market_cap=Decimal(69200),
+        market={"liquidity_usd": "17800", "buys_5m": 66, "sells_5m": 10},
     )
     assert "<b>TWMW&lt;</b> — 9/12 checks passed" in first
-    assert "Signal: 14:00 UTC, 16 Oct · MCap <b>$69.2k</b>" in first
+    assert "Signal: 14:00 UTC, 16 Oct" in first
+    assert "MCap  $69.2k" in first
+    assert "Liq   $17.8k" in first
+    assert "5m    66 buy/10 sell" in first
+    assert "Safety   ▰▰▰▰▰▰▰▰▰▱▱▱ 9/12" in first
+    assert "Contract ████ 4/4" in first
+    assert "Holders  ██░░ 2/4" in first
+    assert "Market   ███░ 3/4" in first
     assert "wins and losses" in first
+    pre = first.split("<pre>")[1].split("</pre>")[0]
+    assert max(len(line) for line in pre.replace("&quot;", '"').split("\n")) <= 32
+    no_market = channel_signal_text(
+        symbol="X", mint=MINT, checks=checks, triggered_at=T0, market_cap=None
+    )
+    assert "MCap  —" in no_market
     result = horizon_result(
         [(0.0, Decimal(69200)), (30.0, Decimal(20000)), (60.0, Decimal(4100))],
         minutes=60,
         tolerance=10,
     )
     assert result is not None
-    text = channel_result_text(symbol="TWMW", horizon="1h", result=result)
+    text = channel_result_text(symbol="TWMW", mint=MINT, horizon="1h", result=result)
     assert "💀 <b>TWMW</b> · 1h after signal: <b>-94%</b>" in text
-    assert "MCap $69.2k → $4.1k" in text
-    assert "Never traded above the signal market cap." in text
-    assert "<pre>" in text
+    assert "$69.2k → $4.1k" in text
+    assert "Never above start" in text
+    assert text.count("<pre>") == 2
+
+
+def test_a_token_keeps_its_mascot_and_only_the_mood_changes() -> None:
+    from app.services.mascots import DEAD, DOWN, MASCOTS, UP, beside, mascot_for, mood_for
+
+    assert mascot_for(MINT) == mascot_for(MINT)
+    assert len({mascot_for(f"mint-{n}") for n in range(200)}) == len(MASCOTS)
+    assert mood_for(Decimal("0.5")) == UP
+    assert mood_for(Decimal("-0.3")) == DOWN
+    assert mood_for(Decimal("-0.9")) == DEAD
+    frame = MASCOTS[mascot_for(MINT)][DEAD]
+    block = beside(MINT, DEAD, ["a", "b"]).split("\n")
+    assert len(block) == 3
+    assert block[0].startswith(frame[0].rstrip()) and block[0].endswith("a")
 
 
 def _quote(cap: str | None) -> DexQuote:
@@ -232,7 +262,7 @@ async def test_publisher_posts_once_then_replies_with_the_result(pipeline_infra:
         assert await publisher(2).run_once() == 1
         assert await publisher(3).run_once() == 0
         text, reply_to, link = channel.posts[0]
-        assert "MCap <b>$69.2k</b>" in text
+        assert "MCap  $69.2k" in text
         assert reply_to is None
         assert link is not None and link[1].endswith(signal.id.hex)
 
@@ -276,7 +306,7 @@ async def test_publisher_skips_old_style_signals_and_retries_failed_sends(
         assert len(up.posts) == 1
         assert "NEW" in up.posts[0][0]
         # No market-cap reading within 5 minutes, so the post has no MCap.
-        assert "MCap" not in up.posts[0][0]
+        assert "MCap  —" in up.posts[0][0]
     finally:
         await truncate_pipeline(engine)
         await engine.dispose()

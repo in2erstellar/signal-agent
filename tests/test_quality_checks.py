@@ -370,6 +370,8 @@ async def test_fusion_stores_the_checklist_on_the_signal(pipeline_infra: object)
     assert signal.composite_score == Decimal("100.00")
     assert signal.context is not None
     assert signal.context["quality_passed"] == 12
+    assert signal.context["market"]["liquidity_usd"] == "25000"
+    assert signal.context["market"]["buys_5m"] == 40
     assert len(signal.context["quality_checks"]) == 12
 
 

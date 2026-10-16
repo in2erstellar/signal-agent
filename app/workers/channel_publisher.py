@@ -92,13 +92,18 @@ class ChannelPublisher:
             waited = (now - signal.triggered_at).total_seconds()
             if cap is None and waited < CHANNEL_SIGNAL_WAIT_FOR_CAP_SECONDS:
                 continue
+            raw_market = context.get("market")
+            market: dict[str, object] = raw_market if isinstance(raw_market, dict) else {}
+            if cap is None and market.get("market_cap_usd") is not None:
+                # The checklist's own DexScreener reading, taken at the signal.
+                cap = Decimal(str(market["market_cap_usd"]))
             text = channel_signal_text(
                 symbol=token.symbol,
                 mint=token.mint,
-                passed=int(context.get("quality_passed") or 0),
-                total=int(context.get("quality_total") or len(context["quality_checks"])),
+                checks=[row for row in context["quality_checks"] if isinstance(row, dict)],
                 triggered_at=signal.triggered_at,
                 market_cap=cap,
+                market=market,
             )
             url = self._card_link(signal)
             message_id = await self._send(
@@ -143,7 +148,9 @@ class ChannelPublisher:
                     await self._record(signal.id, kind, None, now, status="skipped")
                     logger.info("channel_result_skipped", mint=token.mint, kind=kind)
                 continue
-            text = channel_result_text(symbol=token.symbol, horizon=kind, result=result)
+            text = channel_result_text(
+                symbol=token.symbol, mint=token.mint, horizon=kind, result=result
+            )
             message_id = await self._send(text, reply_to=parent_id, mint=token.mint)
             if message_id is None:
                 continue

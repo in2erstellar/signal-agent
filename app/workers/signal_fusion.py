@@ -292,6 +292,7 @@ class SignalFusion:
         stored_context["quality_checks"] = [check.as_dict() for check in checks]
         stored_context["quality_passed"] = result.passed
         stored_context["quality_total"] = result.total
+        stored_context["market"] = _market_snapshot(readings)
         return await self._insert_signal(
             session,
             token,
@@ -520,6 +521,19 @@ class SignalFusion:
             token.ai_review_status = None
             raise
         logger.info("ai_review_enqueued", mint=token.mint, trace_id=token.trace_id)
+
+
+def _market_snapshot(readings: ExternalReadings) -> dict[str, str | int | None]:
+    """DexScreener figures at the signal, as strings, for the channel post."""
+    dex = readings.dex
+    if dex is None:
+        return {}
+    return {
+        "market_cap_usd": None if dex.market_cap_usd is None else str(dex.market_cap_usd),
+        "liquidity_usd": None if dex.liquidity_usd is None else str(dex.liquidity_usd),
+        "buys_5m": dex.buys_5m,
+        "sells_5m": dex.sells_5m,
+    }
 
 
 def _quality_done_key(token: Token) -> str:

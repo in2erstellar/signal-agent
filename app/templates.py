@@ -25,6 +25,7 @@ from app.config import (
 )
 from app.services.ascii_chart import format_usd
 from app.services.channel_results import HorizonResult, verdict_icon
+from app.services.mascots import NEUTRAL, beside, mood_for
 from app.services.track_record import TrackRecord
 from app.ui_constants import (
     ICON_BAIT_WARNING,
@@ -80,46 +81,76 @@ def channel_signal_text(
     *,
     symbol: str | None,
     mint: str,
-    passed: int,
-    total: int,
+    checks: list[dict[str, object]],
     triggered_at: datetime,
     market_cap: Decimal | None,
+    market: dict[str, object] | None = None,
 ) -> str:
-    """Short public post at the moment of the signal. Results follow as replies."""
+    """Public post at the moment of the signal: mascot, start figures, checklist bars."""
+    passed = sum(1 for row in checks if row.get("status") == "pass")
+    total = len(checks)
     icon = ICON_RISK_LOW if passed == total else ICON_RISK_MED
     when = triggered_at.astimezone(timezone.utc).strftime("%H:%M UTC, %d %b")
-    cap = "" if market_cap is None else f" · MCap <b>{format_usd(market_cap)}</b>"
+    snapshot = market or {}
+    liquidity = _decimal_or_none(snapshot.get("liquidity_usd"))
+    buys, sells = snapshot.get("buys_5m"), snapshot.get("sells_5m")
+    figures = [
+        f"MCap  {'—' if market_cap is None else format_usd(market_cap)}",
+        f"Liq   {'—' if liquidity is None else format_usd(liquidity)}",
+        "5m    "
+        + (f"{buys} buy/{sells} sell" if isinstance(buys, int) and isinstance(sells, int) else "—"),
+    ]
+    block = [beside(mint, NEUTRAL, figures), ""]
+    block.append(f"{'Safety':<9}{'▰' * passed}{'▱' * (total - passed)} {passed}/{total}")
+    for group, _icon, title in QUALITY_GROUPS:
+        members = [row for row in checks if row.get("group") == group]
+        if not members:
+            continue
+        ok = sum(1 for row in members if row.get("status") == "pass")
+        block.append(f"{title:<9}{'█' * ok}{'░' * (len(members) - ok)} {ok}/{len(members)}")
     return "\n".join(
         [
             f"{icon} <b>{escape(symbol or 'no ticker')}</b> — {passed}/{total} checks passed",
-            f"Signal: {when}{cap}",
+            f"Signal: {when}",
+            f"<pre>{escape(chr(10).join(block))}</pre>",
             _code(mint),
-            "",
             "Results follow as replies: 1h · 24h · 7d. Every signal, wins and losses.",
             f"<i>{QUALITY_NOTE}</i>",
         ]
     )
 
 
+def _decimal_or_none(raw: object) -> Decimal | None:
+    if raw is None:
+        return None
+    try:
+        return Decimal(str(raw))
+    except ArithmeticError:
+        return None
+
+
 def channel_result_text(
     *,
     symbol: str | None,
+    mint: str,
     horizon: str,
     result: HorizonResult,
 ) -> str:
     change = _signed_percent(result.change)
+    if result.peak > result.base:
+        peak = f"Peak {_signed_percent(result.peak / result.base - 1)} at {_duration(result.peak_minutes)}"
+    else:
+        peak = "Never above start"
+    figures = [
+        f"{horizon:<5}{change}",
+        f"{format_usd(result.base)} → {format_usd(result.end)}",
+        peak,
+    ]
     lines = [
         f"{verdict_icon(result.change)} <b>{escape(symbol or 'no ticker')}</b> · "
         f"{horizon} after signal: <b>{change}</b>",
-        f"MCap {format_usd(result.base)} → {format_usd(result.end)}",
+        f"<pre>{escape(beside(mint, mood_for(result.change), figures))}</pre>",
     ]
-    if result.peak > result.base:
-        lines.append(
-            f"Peak {format_usd(result.peak)} ({_signed_percent(result.peak / result.base - 1)}) "
-            f"at {_duration(result.peak_minutes)}"
-        )
-    else:
-        lines.append("Never traded above the signal market cap.")
     if result.chart:
         lines.append(f"<pre>{escape(result.chart)}</pre>")
     return "\n".join(lines)
