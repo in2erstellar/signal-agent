@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.adapters.dexscreener import DexQuote, DexScreenerPrices
 from app.adapters.token_metadata import TokenMetadataClient, TokenMetadataError, ipfs_path
 from app.adapters.token_security import MintView, _mint_view
-from app.config import QUALITY_MAX_LAUNCH_TRADES, QUALITY_MIN_PASSED
+from app.config import QUALITY_MAX_LAUNCH_TRADES, QUALITY_MIN_PASSED, QUALITY_TREND_TICKER_MIN
 from app.db.models import Signal, Token
 from app.services.quality_checks import (
     FAIL,
@@ -22,6 +22,7 @@ from app.services.quality_checks import (
     ExternalReadings,
     best_possible,
     build_checklist,
+    short_line,
     verdict,
 )
 from app.services.quality_inputs import launch_trades
@@ -127,8 +128,16 @@ def test_unavailable_is_never_a_pass() -> None:
     assert _status(checks, "creator_share") == UNAVAILABLE
     assert _status(checks, "liquidity") == UNAVAILABLE
     result = verdict(checks)
-    assert "creator_share" in result.required_failed
+    assert result.required_failed == ()
     assert not result.emits
+
+
+def test_creator_share_is_not_required() -> None:
+    no_data = {"distribution_status": "unavailable", "distribution_reason": "x"}
+    result = verdict(_checks(context=no_data))
+    assert result.required_failed == ()
+    assert result.passed == 11
+    assert result.emits
 
 
 def test_best_possible_counts_only_external_lines_still_missing() -> None:
@@ -155,6 +164,15 @@ def test_market_lines() -> None:
     clone_line = next(check for check in clones if check.key == "not_a_clone")
     assert clone_line.status == FAIL
     assert "3 other tokens named MOO" in clone_line.text
+
+
+def test_a_trend_ticker_is_not_a_clone() -> None:
+    below = next(c for c in _checks(clones=QUALITY_TREND_TICKER_MIN - 1) if c.key == "not_a_clone")
+    assert below.status == FAIL
+    trend = next(c for c in _checks(clones=QUALITY_TREND_TICKER_MIN) if c.key == "not_a_clone")
+    assert trend.status == PASS
+    assert trend.text == f"Trend ticker: {QUALITY_TREND_TICKER_MIN} other tokens named MOO in 24h"
+    assert short_line(trend.as_dict()) == f"Trend ticker: {QUALITY_TREND_TICKER_MIN}"
 
 
 def test_socials_none_listed_is_a_fail_and_no_metadata_is_unavailable() -> None:
@@ -315,7 +333,8 @@ def test_card_shows_every_line_with_its_icon_and_the_rule() -> None:
 
 def test_explainer_names_every_required_line() -> None:
     text = checks_explained_text()
-    assert text.count("Required.") == 4
+    assert text.count("Required.") == 3
+    assert "Confirmed signal" in text
     assert f"at least {QUALITY_MIN_PASSED} of 12" in text
 
 

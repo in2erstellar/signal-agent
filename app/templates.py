@@ -19,8 +19,10 @@ from app.config import (
     QUALITY_MAX_LAUNCH_TRADES,
     QUALITY_MIN_LIQUIDITY_USD,
     QUALITY_MIN_PASSED,
+    QUALITY_TREND_TICKER_MIN,
     RISK_ICON_LOW_MAX,
     RISK_ICON_MED_MAX,
+    SIGNAL_KIND_CONFIRMED,
     SIGNAL_MAX_CREATOR_SHARE,
 )
 from app.services.ascii_chart import format_usd
@@ -61,7 +63,14 @@ STORED_SCAN_NOTE = (
 # old "risk_score" label read as "more risk" to users and to the AI review.
 CHECKS_PASSED_LABEL = "Checks passed"
 
-QUALITY_KEYS = ("quality_checks", "quality_passed", "quality_total", "market")
+QUALITY_KEYS = (
+    "quality_checks",
+    "quality_passed",
+    "quality_total",
+    "market",
+    "kind",
+    "confirmation",
+)
 QUALITY_GROUPS = (
     ("contract", ICON_LP_LOCKED, "Contract"),
     ("holders", ICON_CREATOR, "Holders"),
@@ -69,9 +78,15 @@ QUALITY_GROUPS = (
 )
 QUALITY_STATUS_ICONS = {"pass": ICON_CONFIRM, "fail": ICON_CANCEL, "unavailable": ICON_UNAVAILABLE}
 QUALITY_RULE = (
-    "Rule: mint, freeze, LP, and creator share must pass, "
+    "Early signal: mint, freeze, and LP must pass, "
     f"and at least {QUALITY_MIN_PASSED} of 12 lines overall. "
     "? means no data and counts as not passed."
+)
+CONFIRMED_RULE = (
+    "Confirmed signal: the price 1h after listing was at or above the listing "
+    "price, and still was when this was sent. Mint, freeze, LP, and liquidity "
+    f"must pass. The {QUALITY_MIN_PASSED}-of-12 rule does not apply. "
+    "? means no data."
 )
 QUALITY_NOTE = "Safety filter only. It does not predict price."
 HOW_CHECKS_BUTTON = "🔍 How checks work"
@@ -86,22 +101,41 @@ def channel_signal_text(
     triggered_at: datetime,
     market_cap: Decimal | None,
     market: dict[str, object] | None = None,
+    context: dict[str, object] | None = None,
 ) -> str:
     """Public post at the moment of the signal: mascot, start figures, checklist bars."""
     passed = sum(1 for row in checks if row.get("status") == "pass")
     total = len(checks)
     icon = ICON_RISK_LOW if passed == total else ICON_RISK_MED
     when = triggered_at.astimezone(timezone.utc).strftime("%H:%M UTC, %d %b")
+    confirmed = confirmed_line(context)
     return "\n".join(
         [
             f"{icon} <b>{escape(symbol or 'no ticker')}</b> — {passed}/{total} checks passed",
-            f"Signal: {when}",
+            *([confirmed] if confirmed else []),
+            f"{'Confirmed' if confirmed else 'Signal'}: {when}",
             f"<pre>{escape(summary_block(mint, checks, market_cap, market))}</pre>",
             _code(mint),
             "Results follow as replies: 1h · 24h · 7d. Every signal, wins and losses.",
             f"<i>{QUALITY_NOTE}</i>",
         ]
     )
+
+
+def confirmed_line(context: dict[str, object] | None) -> str | None:
+    """Badge for a confirmed signal with its change since listing, else None."""
+    if not isinstance(context, dict) or context.get("kind") != SIGNAL_KIND_CONFIRMED:
+        return None
+    raw = context.get("confirmation")
+    prices = raw if isinstance(raw, dict) else {}
+    listing = _decimal_or_none(prices.get("listing_price_usd"))
+    now = _decimal_or_none(prices.get("price_usd"))
+    change = (
+        f" ({_signed_percent(now / listing - 1)} since listing)"
+        if listing is not None and listing > 0 and now is not None
+        else ""
+    )
+    return f"{ICON_CONFIRM} <b>CONFIRMED</b> · held 1h after listing{change}"
 
 
 def summary_block(
@@ -195,6 +229,8 @@ def _duration(minutes: float) -> str:
     if minutes < 48 * 60:
         return f"{int(round(minutes / 60))}h"
     return f"{round(minutes / (24 * 60), 1)}d"
+
+
 TRACK_RECORD_BUTTON = f"{ICON_STATUS} Track record"
 
 
@@ -222,7 +258,7 @@ def checks_explained_text() -> str:
             f"• <b>Top-10 holders</b> own at most {holders}, pool excluded.",
             "• <b>Funder cluster</b>: top holders were not all funded by one wallet.",
             "• <b>Creator share</b>: creator and wallets funded by the same source own "
-            f"at most {_share_text(SIGNAL_MAX_CREATOR_SHARE)}. Required.",
+            f"at most {_share_text(SIGNAL_MAX_CREATOR_SHARE)}.",
             f"• <b>Launch trades</b>: at most {QUALITY_MAX_LAUNCH_TRADES} trades in the "
             f"first {QUALITY_LAUNCH_SLOTS} blocks. More usually means bundled snipers.",
             "",
@@ -230,12 +266,17 @@ def checks_explained_text() -> str:
             f"• <b>Liquidity</b> of at least {liquidity}.",
             "• <b>Buys over sells</b> in the last 5 minutes.",
             f"• <b>Unique ticker</b>: no other token with the same ticker in "
-            f"{QUALITY_CLONE_WINDOW_HOURS}h.",
+            f"{QUALITY_CLONE_WINDOW_HOURS}h. A ticker with {QUALITY_TREND_TICKER_MIN}+ "
+            "tokens is a trend, not a copy, and passes.",
             "• <b>Socials listed</b> in the token metadata. Not verified: anyone can "
             "paste a famous account.",
             "",
-            f"<b>Signal rule</b>: every required line passes and at least "
-            f"{QUALITY_MIN_PASSED} of 12 lines pass.",
+            f"<b>Early signal</b>: every required line passes and at least "
+            f"{QUALITY_MIN_PASSED} of 12 lines pass. Sent minutes after migration.",
+            f"{ICON_CONFIRM} <b>Confirmed signal</b>: for a token with no early signal. "
+            "The price 1h after listing is at or above the listing price and still is; "
+            "mint, freeze, LP, and liquidity pass. In our first backtest, tokens that "
+            "held 1h died far less often. Later, so the entry is higher.",
             "Thresholds are hand-picked starting values and may change once the "
             "track record shows which lines matter.",
             "",
@@ -244,22 +285,31 @@ def checks_explained_text() -> str:
     )
 
 
-def track_record_text(record: TrackRecord) -> str:
+def track_record_text(record: TrackRecord, confirmed: TrackRecord | None = None) -> str:
     lines = [f"{ICON_STATUS} <b>Track record</b>", ""]
-    if record.signals == 0:
+    if record.signals == 0 and (confirmed is None or confirmed.signals == 0):
         lines.append("No signals yet.")
         return "\n".join(lines)
+    lines.append(
+        "Change is measured from the price at the signal. Signals without both "
+        "prices are left out, not counted."
+    )
+    lines.extend(["", "<b>Early signals</b>", *_record_lines(record)])
+    if confirmed is not None and confirmed.signals:
+        lines.extend(["", f"{ICON_CONFIRM} <b>Confirmed signals</b>", *_record_lines(confirmed)])
+    lines.extend(["", "<i>Past results do not predict future ones.</i>"])
+    return "\n".join(lines)
+
+
+def _record_lines(record: TrackRecord) -> list[str]:
+    if record.signals == 0:
+        return ["None yet."]
     since = (
         record.first_signal_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
         if record.first_signal_at is not None
         else "unknown"
     )
-    lines.append(f"Signals sent: {_code(record.signals)} (since {since})")
-    lines.append(
-        "Change is measured from the price at the signal. Signals without both "
-        "prices are left out, not counted."
-    )
-    lines.append("")
+    lines = [f"Sent: {_code(record.signals)} (since {since})"]
     for stats in record.horizons:
         label = f"After {stats.horizon}"
         if stats.measured == 0:
@@ -274,8 +324,7 @@ def track_record_text(record: TrackRecord) -> str:
             f"<b>{label}</b>: {stats.measured} measured · "
             f"{stats.collapsed} fell 90%+ · {stats.doubled} doubled · median {change}"
         )
-    lines.extend(["", "<i>Past results do not predict future ones.</i>"])
-    return "\n".join(lines)
+    return lines
 
 
 def _share_text(share: Decimal) -> str:
@@ -321,14 +370,8 @@ def admin_restricted_text() -> str:
 
 def menu_text(*, admin: bool) -> str:
     if admin:
-        return (
-            f"{ICON_SIGNAL} <b>Menu</b>\n"
-            "Signals · wallets · settings · status"
-        )
-    return (
-        f"{ICON_SIGNAL} <b>Menu</b>\n"
-        "Signals · settings · status"
-    )
+        return f"{ICON_SIGNAL} <b>Menu</b>\nSignals · wallets · settings · status"
+    return f"{ICON_SIGNAL} <b>Menu</b>\nSignals · settings · status"
 
 
 def stale_menu_text() -> str:
@@ -529,10 +572,12 @@ def quality_lines(
     raw_market = context.get("market")
     market = raw_market if isinstance(raw_market, dict) else {}
     cap = _decimal_or_none(market.get("market_cap_usd"))
+    confirmed = confirmed_line(context)
     lines = [
         f"{icon} <b>{name}</b> — <b>{passed}/{total}</b> checks passed",
+        *([confirmed] if confirmed else []),
         f"<pre>{escape(summary_block(mint, rows, cap, market, detailed=True))}</pre>",
-        f"<i>{escape(QUALITY_RULE)}</i>",
+        f"<i>{escape(CONFIRMED_RULE if confirmed else QUALITY_RULE)}</i>",
         f"<i>{QUALITY_NOTE}</i>",
     ]
     return lines
@@ -882,7 +927,4 @@ def solscan_account(address: str) -> str:
 
 def _solscan(kind: str, value: str) -> str:
     href = escape(value, quote=True)
-    return (
-        f"<code>{escape(value)}</code>\n"
-        f'<a href="https://solscan.io/{kind}/{href}">Solscan</a>'
-    )
+    return f'<code>{escape(value)}</code>\n<a href="https://solscan.io/{kind}/{href}">Solscan</a>'

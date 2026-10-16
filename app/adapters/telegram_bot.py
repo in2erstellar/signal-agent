@@ -48,6 +48,7 @@ from app.config import (
     DEFAULT_MIN_SCORE,
     DEV_CLUSTER_SHARE_STEP,
     SETTINGS_STEP,
+    SIGNAL_KIND_CONFIRMED,
     SIGNAL_PAGE_SIZE,
 )
 from app.db.models import AlertDelivery, BaitFlag, Signal, Token, TrackedWallet, User, WalletTx
@@ -505,7 +506,8 @@ async def _track_record_body(context: ContextTypes.DEFAULT_TYPE) -> str:
     sessions: async_sessionmaker[AsyncSession] = context.bot_data["sessions"]
     async with sessions() as session:
         record = await load_track_record(session)
-    return track_record_text(record)
+        confirmed = await load_track_record(session, SIGNAL_KIND_CONFIRMED)
+    return track_record_text(record, confirmed)
 
 
 async def _route_info(

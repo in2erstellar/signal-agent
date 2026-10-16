@@ -26,6 +26,7 @@ from app.config import (
     HELIUS_DAILY_REQUEST_BUDGET,
     MARKET_SAMPLE_INTERVAL_SECONDS,
     OUTCOME_POLL_INTERVAL_SECONDS,
+    SIGNAL_CONFIRM_INTERVAL_SECONDS,
     SIGNAL_FUSION_INTERVAL_SECONDS,
     get_settings,
 )
@@ -344,6 +345,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             lambda: poll_loop(stop, outcomes.run_once, OUTCOME_POLL_INTERVAL_SECONDS),
             lambda: poll_loop(stop, sample_once, MARKET_SAMPLE_INTERVAL_SECONDS),
             lambda: poll_loop(stop, fusion.run_once, SIGNAL_FUSION_INTERVAL_SECONDS),
+            lambda: poll_loop(stop, fusion.confirm_once, SIGNAL_CONFIRM_INTERVAL_SECONDS),
             ai_review_loop,
             alerts_loop,
         )

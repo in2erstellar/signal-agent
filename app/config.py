@@ -100,9 +100,7 @@ class Settings(BaseSettings):
     @classmethod
     def database_url_must_be_async(cls, value: str) -> str:
         if not value.startswith("postgresql+asyncpg://"):
-            raise ValueError(
-                "DATABASE_URL must use the postgresql+asyncpg driver"
-            )
+            raise ValueError("DATABASE_URL must use the postgresql+asyncpg driver")
         return value
 
     @field_validator("redis_url")
@@ -207,6 +205,7 @@ RISK_HEAVY_GROUP = "risk_heavy_workers"
 
 BAIT_POLL_INTERVAL_SECONDS = 60
 SIGNAL_FUSION_INTERVAL_SECONDS = 30
+SIGNAL_CONFIRM_INTERVAL_SECONDS = 60
 OUTCOME_POLL_INTERVAL_SECONDS = 60
 
 # Market-cap readings after a signal: (signal age up to, minutes between readings).
@@ -251,7 +250,10 @@ SIGNAL_MAX_CREATOR_SHARE = Decimal("0.30")
 
 # The 12-line checklist on a signal card. Thresholds are hand-picked starting
 # values, printed on the card next to each reading. Unavailable is not a pass.
-QUALITY_REQUIRED_CHECKS = ("mint_authority", "freeze_authority", "lp_locked", "creator_share")
+# Creator share is a normal line, not a required one: in a backtest of 217
+# migrated tokens (2026-10-16) it did not separate dead tokens from live ones,
+# and it has no data for most tokens.
+QUALITY_REQUIRED_CHECKS = ("mint_authority", "freeze_authority", "lp_locked")
 QUALITY_MIN_PASSED = 9
 QUALITY_MIN_LIQUIDITY_USD = Decimal("10000")
 # Curve transactions in the creation slot and the next one, the create excluded.
@@ -260,10 +262,25 @@ QUALITY_MAX_LAUNCH_TRADES = 3
 # A graduated curve has a few thousand signatures; past this it is unavailable.
 QUALITY_MAX_CURVE_SIGNATURES = 8000
 QUALITY_CLONE_WINDOW_HOURS = 24
+# This many same-ticker tokens in the window is a trend, not one copied token.
+# Trend tickers died about as often as unique ones in the backtest.
+QUALITY_TREND_TICKER_MIN = 20
 # External readings are retried this many fusion cycles, then the card goes out
 # (or not) with what came back.
 QUALITY_MAX_ATTEMPTS = 3
 QUALITY_STATE_TTL_SECONDS = 3600
+
+# Confirmed signal: a token without an early signal whose price 1h after
+# listing is at least the listing price. In the backtest 55% of such tokens
+# died against 92% of the rest (11 vs 65 tokens, one day of data).
+CONFIRM_MIN_PRICE_RATIO = Decimal("1")
+# A 1h reading older than this is too late to confirm on.
+CONFIRM_MAX_DELAY_MINUTES = 30
+# Lines that must pass on a confirmed signal; the 9-of-12 rule does not apply.
+CONFIRM_REQUIRED_CHECKS = ("mint_authority", "freeze_authority", "lp_locked", "liquidity")
+CONFIRM_FORBIDDEN_FAILS = ("token_extensions",)
+SIGNAL_KIND_EARLY = "early"
+SIGNAL_KIND_CONFIRMED = "confirmed"
 
 # Alert fan-out. min_score is a floor on composite_score.
 # max_risk is a ceiling on (100 - risk_score): a higher value admits more tokens.
@@ -384,9 +401,7 @@ DISCOVERY_PENDING_MAX_AGE_HOURS = 24
 DISCOVERY_FRESH_WINDOW_HOURS = 1
 
 if AI_REVIEW_DAILY_BUDGET >= AI_REVIEW_HOURLY_BUDGET * 24:
-    raise RuntimeError(
-        "AI_REVIEW_DAILY_BUDGET must bind before 24 consecutive hourly budgets"
-    )
+    raise RuntimeError("AI_REVIEW_DAILY_BUDGET must bind before 24 consecutive hourly budgets")
 if AI_REVIEW_DAILY_TOKEN_BUDGET <= 0 or AI_REVIEW_DAILY_TOKEN_BUDGET >= 200_000:
     raise RuntimeError("AI_REVIEW_DAILY_TOKEN_BUDGET must sit strictly under 200000 TPD")
 

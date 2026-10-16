@@ -24,6 +24,7 @@ from app.config import (
     QUALITY_MIN_LIQUIDITY_USD,
     QUALITY_MIN_PASSED,
     QUALITY_REQUIRED_CHECKS,
+    QUALITY_TREND_TICKER_MIN,
     SIGNAL_MAX_CREATOR_SHARE,
 )
 
@@ -174,6 +175,18 @@ def verdict(checks: list[QualityCheck]) -> QualityVerdict:
     )
 
 
+def confirm_blockers(
+    checks: list[QualityCheck],
+    required: tuple[str, ...],
+    forbidden_fails: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Lines that stop a confirmed signal: a required line not passed, or a forbidden fail."""
+    by_key = {check.key: check for check in checks}
+    missing = tuple(key for key in required if key not in by_key or by_key[key].status != PASS)
+    failed = tuple(key for key in forbidden_fails if key in by_key and by_key[key].status == FAIL)
+    return missing + failed
+
+
 _REVIEW_STATUS = {PASS: "pass", FAIL: "fail", UNAVAILABLE: "no data"}
 
 
@@ -240,7 +253,9 @@ def short_line(row: dict[str, Any]) -> str:
         return _fit(f"5m {numbers[1]} buy/{numbers[2]} sell")
     if key == "not_a_clone":
         if status == PASS:
-            return "Unique ticker"
+            return (
+                _fit(f"Trend ticker: {numbers[0]}") if text.startswith("Trend") else "Unique ticker"
+            )
         return _fit(f"Ticker clones: {numbers[0]}" if numbers else "Ticker clones")
     return _fit(text)
 
@@ -375,6 +390,13 @@ def _clone_check(clone_count: int | None, symbol: str | None) -> QualityCheck:
         return QualityCheck(key, group, UNAVAILABLE, "Ticker clones: no data")
     if clone_count == 0:
         return QualityCheck(key, group, PASS, f"Unique ticker (no copies in {window})")
+    if clone_count >= QUALITY_TREND_TICKER_MIN:
+        return QualityCheck(
+            key,
+            group,
+            PASS,
+            f"Trend ticker: {clone_count} other tokens named {symbol} in {window}",
+        )
     return QualityCheck(
         key,
         group,

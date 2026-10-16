@@ -18,6 +18,12 @@ lines must pass and enough lines in total must pass. ``composite_score`` is
 then the share of passed lines on a 0-100 scale, and the lines are stored in
 ``signals.context["quality_checks"]`` for the card. Without a reader the
 composite rule above still applies.
+
+``confirm_once`` adds a second kind of signal. A token that got no early
+signal is confirmed when its observed 1h price is at least its observed
+listing price, the current DexScreener price is too, and the contract lines
+and liquidity pass. The 9-of-12 rule does not apply to it. It is stored with
+``context["kind"] == "confirmed"`` and the prices it was confirmed on.
 """
 
 from __future__ import annotations
@@ -32,23 +38,30 @@ from redis.asyncio import Redis
 from sqlalchemy import exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from app import config
 from app.adapters.ai_review import TokenReviewInput, estimate_review_tokens
 from app.config import (
     AI_REVIEW_QUEUE,
+    CONFIRM_FORBIDDEN_FAILS,
+    CONFIRM_MAX_DELAY_MINUTES,
+    CONFIRM_MIN_PRICE_RATIO,
+    CONFIRM_REQUIRED_CHECKS,
     QUALITY_CLONE_WINDOW_HOURS,
     QUALITY_MAX_ATTEMPTS,
     QUALITY_MIN_PASSED,
     QUALITY_STATE_TTL_SECONDS,
     SIGNAL_BAIT_WEIGHT,
+    SIGNAL_KIND_CONFIRMED,
+    SIGNAL_KIND_EARLY,
     SIGNAL_MAX_CREATOR_SHARE,
     SIGNAL_RISK_SCAN_MAX_AGE_MINUTES,
     SIGNAL_RISK_WEIGHT,
     SIGNAL_THRESHOLD,
     SIGNAL_WALLET_WEIGHT,
 )
-from app.db.models import BaitFlag, Signal, Token, TrackedWallet, WalletTx
+from app.db.models import BaitFlag, OutcomeCheck, Signal, Token, TrackedWallet, WalletTx
 from app.observability import bind_trace
 from app.services.ai_budget import release_review, reserve_review, review_counts, tokens_used
 from app.services.creator_cluster import load_creator_context, share_above_limit
@@ -59,6 +72,7 @@ from app.services.quality_checks import (
     best_possible,
     build_checklist,
     checklist_for_review,
+    confirm_blockers,
     verdict,
 )
 from app.services.quality_inputs import QualityReader
@@ -289,6 +303,7 @@ class SignalFusion:
             wallet_score_from_win_rates(win_rates) if wallet_history_known(win_rates) else None
         )
         stored_context: dict[str, Any] = dict(context or {})
+        stored_context["kind"] = SIGNAL_KIND_EARLY
         stored_context["quality_checks"] = [check.as_dict() for check in checks]
         stored_context["quality_passed"] = result.passed
         stored_context["quality_total"] = result.total
@@ -303,6 +318,117 @@ class SignalFusion:
             context=stored_context,
             penalty=0,
         )
+
+    async def confirm_once(self) -> int:
+        """Confirmed signals for tokens whose price held 1h after listing."""
+        reader = self._quality
+        if reader is None:
+            return 0
+        now = self._clock()
+        listing = aliased(OutcomeCheck)
+        hour = aliased(OutcomeCheck)
+        created = 0
+        async with self._sessions() as session:
+            async with session.begin():
+                rows = (
+                    await session.execute(
+                        select(Token, listing.price_usd, hour.price_usd)
+                        .join(listing, listing.token_id == Token.id)
+                        .join(hour, hour.token_id == Token.id)
+                        .where(
+                            listing.horizon == "listing",
+                            listing.status == "observed",
+                            listing.price_usd > 0,
+                            hour.horizon == "1h",
+                            hour.status == "observed",
+                            hour.price_usd > 0,
+                            hour.observed_at >= now - timedelta(minutes=CONFIRM_MAX_DELAY_MINUTES),
+                            ~exists(select(Signal.id).where(Signal.token_id == Token.id)),
+                        )
+                    )
+                ).all()
+                for token, listing_price, hour_price in rows:
+                    if self._stop is not None and self._stop.is_set():
+                        break
+                    listing_price, hour_price = Decimal(listing_price), Decimal(hour_price)
+                    if hour_price < listing_price * CONFIRM_MIN_PRICE_RATIO:
+                        continue
+                    try:
+                        async with session.begin_nested():
+                            if await self._confirm(
+                                session, token, now, reader, listing_price, hour_price
+                            ):
+                                created += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "signal_confirm_failed", mint=token.mint, error_type=type(exc).__name__
+                        )
+        if rows:
+            logger.info("signal_confirm_cycle", candidates=len(rows), created=created)
+        return created
+
+    async def _confirm(
+        self,
+        session: AsyncSession,
+        token: Token,
+        now: datetime,
+        reader: QualityReader,
+        listing_price: Decimal,
+        hour_price: Decimal,
+    ) -> bool:
+        if not await self._confirm_attempt(token):
+            return False
+        context = await load_creator_context(session, token)
+        readings = await reader.read(token)
+        checks = build_checklist(
+            risk_flags=token.risk_flags,
+            creator_context=context,
+            clone_count=await _clone_count(session, token, now),
+            symbol=token.symbol,
+            readings=readings,
+        )
+        price_now = None if readings.dex is None else readings.dex.price_usd
+        blockers = list(confirm_blockers(checks, CONFIRM_REQUIRED_CHECKS, CONFIRM_FORBIDDEN_FAILS))
+        if price_now is None:
+            blockers.append("price_now_unavailable")
+        elif price_now < listing_price * CONFIRM_MIN_PRICE_RATIO:
+            blockers.append("price_fell_below_listing")
+        if blockers or price_now is None:
+            with bind_trace(token.trace_id):
+                logger.info("signal_confirm_rejected", mint=token.mint, blockers=blockers)
+            return False
+        result = verdict(checks)
+        stored_context: dict[str, Any] = dict(context or {})
+        stored_context["kind"] = SIGNAL_KIND_CONFIRMED
+        stored_context["quality_checks"] = [check.as_dict() for check in checks]
+        stored_context["quality_passed"] = result.passed
+        stored_context["quality_total"] = result.total
+        stored_context["market"] = _market_snapshot(readings)
+        stored_context["confirmation"] = {
+            "listing_price_usd": str(listing_price),
+            "hour_price_usd": str(hour_price),
+            "price_usd": str(price_now),
+        }
+        win_rates = await self._win_rates(session, token)
+        return await self._insert_signal(
+            session,
+            token,
+            now,
+            score=result.score,
+            risk=token.risk_score if token.risk_score is not None else Decimal(0),
+            wallet_score=(
+                wallet_score_from_win_rates(win_rates) if wallet_history_known(win_rates) else None
+            ),
+            context=stored_context,
+            penalty=0,
+        )
+
+    async def _confirm_attempt(self, token: Token) -> bool:
+        """One external read per token: the 1h reading that triggers it happens once."""
+        if self._redis is None:
+            return True
+        key = f"confirm:tried:{token.id}"
+        return bool(await self._redis.set(key, "1", nx=True, ex=CONFIRM_MAX_DELAY_MINUTES * 120))
 
     def _log_rejected(self, token: Token, result: QualityVerdict, *, stage: str) -> None:
         with bind_trace(token.trace_id):

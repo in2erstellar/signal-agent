@@ -1,8 +1,10 @@
 """Public track record: what happened to the price after each signal.
 
-A change is measured only from an observed listing price to an observed
-price at the horizon. A signal without both is left out, never counted as
-zero or as a loss.
+An early signal's change is measured from the observed listing price to an
+observed price at the horizon. A confirmed signal fires an hour after
+listing, so its change is measured from the price it was confirmed on, and
+its 1h horizon is left out. A signal without both prices is left out, never
+counted as zero or as a loss.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.config import OUTCOME_HORIZONS
+from app.config import OUTCOME_HORIZONS, SIGNAL_KIND_CONFIRMED, SIGNAL_KIND_EARLY
 from app.db.models import OutcomeCheck, Signal
 
 COLLAPSE_RATIO = Decimal("0.10")
@@ -34,6 +36,7 @@ class HorizonStats:
 
 @dataclass(frozen=True)
 class TrackRecord:
+    kind: str
     signals: int
     first_signal_at: datetime | None
     horizons: tuple[HorizonStats, ...]
@@ -50,13 +53,25 @@ def horizon_stats(horizon: str, ratios: list[Decimal]) -> HorizonStats:
     )
 
 
-async def load_track_record(session: AsyncSession) -> TrackRecord:
+async def load_track_record(session: AsyncSession, kind: str = SIGNAL_KIND_EARLY) -> TrackRecord:
+    is_confirmed = Signal.context["kind"].astext == SIGNAL_KIND_CONFIRMED
+    of_kind = is_confirmed if kind == SIGNAL_KIND_CONFIRMED else ~is_confirmed.is_(True)
     count, first = (
-        await session.execute(select(func.count(Signal.id), func.min(Signal.triggered_at)))
+        await session.execute(
+            select(func.count(Signal.id), func.min(Signal.triggered_at)).where(of_kind)
+        )
     ).one()
+    stats: list[HorizonStats] = []
+    if kind == SIGNAL_KIND_CONFIRMED:
+        for horizon, _seconds in OUTCOME_HORIZONS:
+            if horizon == "1h":
+                continue
+            stats.append(horizon_stats(horizon, await _confirmed_ratios(session, horizon)))
+        return TrackRecord(
+            kind=kind, signals=int(count or 0), first_signal_at=first, horizons=tuple(stats)
+        )
     listing = aliased(OutcomeCheck)
     later = aliased(OutcomeCheck)
-    stats: list[HorizonStats] = []
     for horizon, _seconds in OUTCOME_HORIZONS:
         rows = (
             await session.execute(
@@ -65,6 +80,7 @@ async def load_track_record(session: AsyncSession) -> TrackRecord:
                 .join(listing, listing.token_id == Signal.token_id)
                 .join(later, later.token_id == Signal.token_id)
                 .where(
+                    of_kind,
                     listing.horizon == "listing",
                     listing.status == "observed",
                     listing.price_usd > 0,
@@ -76,4 +92,38 @@ async def load_track_record(session: AsyncSession) -> TrackRecord:
         ).all()
         ratios = [Decimal(after) / Decimal(before) for before, after in rows]
         stats.append(horizon_stats(horizon, ratios))
-    return TrackRecord(signals=int(count or 0), first_signal_at=first, horizons=tuple(stats))
+    return TrackRecord(
+        kind=kind, signals=int(count or 0), first_signal_at=first, horizons=tuple(stats)
+    )
+
+
+async def _confirmed_ratios(session: AsyncSession, horizon: str) -> list[Decimal]:
+    later = aliased(OutcomeCheck)
+    rows = (
+        await session.execute(
+            select(Signal.context, later.price_usd)
+            .join(later, later.token_id == Signal.token_id)
+            .where(
+                Signal.context["kind"].astext == SIGNAL_KIND_CONFIRMED,
+                later.horizon == horizon,
+                later.status == "observed",
+                later.price_usd.is_not(None),
+            )
+        )
+    ).all()
+    ratios = []
+    for context, after in rows:
+        start = confirmation_price(context)
+        if start is not None:
+            ratios.append(Decimal(after) / start)
+    return ratios
+
+
+def confirmation_price(context: object) -> Decimal | None:
+    """The DexScreener price a confirmed signal fired on, or None."""
+    raw = context.get("confirmation") if isinstance(context, dict) else None
+    value = raw.get("price_usd") if isinstance(raw, dict) else None
+    if value is None:
+        return None
+    price = Decimal(str(value))
+    return price if price > 0 else None

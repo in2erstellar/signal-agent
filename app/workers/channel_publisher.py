@@ -104,6 +104,7 @@ class ChannelPublisher:
                 triggered_at=signal.triggered_at,
                 market_cap=cap,
                 market=market,
+                context=context,
             )
             url = self._card_link(signal)
             message_id = await self._send(
