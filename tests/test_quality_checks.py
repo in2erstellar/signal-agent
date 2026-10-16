@@ -128,16 +128,16 @@ def test_unavailable_is_never_a_pass() -> None:
     assert _status(checks, "creator_share") == UNAVAILABLE
     assert _status(checks, "liquidity") == UNAVAILABLE
     result = verdict(checks)
-    assert result.required_failed == ()
+    assert "creator_share" in result.required_failed
     assert not result.emits
 
 
-def test_creator_share_is_not_required() -> None:
+def test_creator_share_with_no_data_blocks_an_early_signal() -> None:
     no_data = {"distribution_status": "unavailable", "distribution_reason": "x"}
     result = verdict(_checks(context=no_data))
-    assert result.required_failed == ()
+    assert result.required_failed == ("creator_share",)
     assert result.passed == 11
-    assert result.emits
+    assert not result.emits
 
 
 def test_best_possible_counts_only_external_lines_still_missing() -> None:
@@ -333,7 +333,7 @@ def test_card_shows_every_line_with_its_icon_and_the_rule() -> None:
 
 def test_explainer_names_every_required_line() -> None:
     text = checks_explained_text()
-    assert text.count("Required.") == 3
+    assert text.count("Required.") == 4
     assert "Confirmed signal" in text
     assert f"at least {QUALITY_MIN_PASSED} of 12" in text
 

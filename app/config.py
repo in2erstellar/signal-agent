@@ -250,10 +250,10 @@ SIGNAL_MAX_CREATOR_SHARE = Decimal("0.30")
 
 # The 12-line checklist on a signal card. Thresholds are hand-picked starting
 # values, printed on the card next to each reading. Unavailable is not a pass.
-# Creator share is a normal line, not a required one: in a backtest of 217
-# migrated tokens (2026-10-16) it did not separate dead tokens from live ones,
-# and it has no data for most tokens.
-QUALITY_REQUIRED_CHECKS = ("mint_authority", "freeze_authority", "lp_locked")
+# Creator share stays required. In a backtest of 217 migrated tokens
+# (2026-10-16) it did not separate dead tokens from live ones, but with it
+# optional the flow filled with celebrity-name tickers and old large caps.
+QUALITY_REQUIRED_CHECKS = ("mint_authority", "freeze_authority", "lp_locked", "creator_share")
 QUALITY_MIN_PASSED = 9
 QUALITY_MIN_LIQUIDITY_USD = Decimal("10000")
 # Curve transactions in the creation slot and the next one, the create excluded.

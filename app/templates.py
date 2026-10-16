@@ -78,7 +78,7 @@ QUALITY_GROUPS = (
 )
 QUALITY_STATUS_ICONS = {"pass": ICON_CONFIRM, "fail": ICON_CANCEL, "unavailable": ICON_UNAVAILABLE}
 QUALITY_RULE = (
-    "Early signal: mint, freeze, and LP must pass, "
+    "Early signal: mint, freeze, LP, and creator share must pass, "
     f"and at least {QUALITY_MIN_PASSED} of 12 lines overall. "
     "? means no data and counts as not passed."
 )
@@ -258,7 +258,7 @@ def checks_explained_text() -> str:
             f"• <b>Top-10 holders</b> own at most {holders}, pool excluded.",
             "• <b>Funder cluster</b>: top holders were not all funded by one wallet.",
             "• <b>Creator share</b>: creator and wallets funded by the same source own "
-            f"at most {_share_text(SIGNAL_MAX_CREATOR_SHARE)}.",
+            f"at most {_share_text(SIGNAL_MAX_CREATOR_SHARE)}. Required.",
             f"• <b>Launch trades</b>: at most {QUALITY_MAX_LAUNCH_TRADES} trades in the "
             f"first {QUALITY_LAUNCH_SLOTS} blocks. More usually means bundled snipers.",
             "",
