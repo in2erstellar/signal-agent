@@ -26,6 +26,7 @@ from app.config import (
     HELIUS_DAILY_REQUEST_BUDGET,
     MARKET_SAMPLE_INTERVAL_SECONDS,
     OUTCOME_POLL_INTERVAL_SECONDS,
+    SIGNAL_CONFIRM_ENABLED,
     SIGNAL_CONFIRM_INTERVAL_SECONDS,
     SIGNAL_FUSION_INTERVAL_SECONDS,
     get_settings,
@@ -334,6 +335,11 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             await application.shutdown()
 
     logger.info("workers_started")
+    confirm_loops = (
+        [lambda: poll_loop(stop, fusion.confirm_once, SIGNAL_CONFIRM_INTERVAL_SECONDS)]
+        if SIGNAL_CONFIRM_ENABLED
+        else []
+    )
     try:
         await run_until_stopped(
             stop,
@@ -345,9 +351,9 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             lambda: poll_loop(stop, outcomes.run_once, OUTCOME_POLL_INTERVAL_SECONDS),
             lambda: poll_loop(stop, sample_once, MARKET_SAMPLE_INTERVAL_SECONDS),
             lambda: poll_loop(stop, fusion.run_once, SIGNAL_FUSION_INTERVAL_SECONDS),
-            lambda: poll_loop(stop, fusion.confirm_once, SIGNAL_CONFIRM_INTERVAL_SECONDS),
             ai_review_loop,
             alerts_loop,
+            *confirm_loops,
         )
     finally:
         await reviews.aclose()

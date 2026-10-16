@@ -206,6 +206,10 @@ RISK_HEAVY_GROUP = "risk_heavy_workers"
 BAIT_POLL_INTERVAL_SECONDS = 60
 SIGNAL_FUSION_INTERVAL_SECONDS = 30
 SIGNAL_CONFIRM_INTERVAL_SECONDS = 60
+# Off: the "listing" outcome of a token seen long after its migration is a late
+# price, so old large caps (SARP at $3.5M) passed as "held 1h after listing".
+# Turn on only with a guard that the listing reading was taken at migration.
+SIGNAL_CONFIRM_ENABLED = False
 OUTCOME_POLL_INTERVAL_SECONDS = 60
 
 # Market-cap readings after a signal: (signal age up to, minutes between readings).

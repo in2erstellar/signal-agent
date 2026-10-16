@@ -1,205 +1,163 @@
 # SignalForge
 
-Инструмент мониторинга мемкоинов на Solana. Интерфейс — Telegram-бот: `/start` открыт для всех, сигналы уходят каждому подписчику. Команды кошельков (`/watch`, `/unwatch`, `/wallets`) доступны только `role=admin`. Id из `TELEGRAM_ADMIN_IDS` получают эту роль при создании записи. Публичной страницы и канала нет.
+A Telegram bot that watched every new Solana memecoin on pump.fun, ran a
+12-line on-chain safety checklist on each token that migrated to a DEX, and
+posted every signal to a public channel with its 1h, 24h, and 7d results, losses
+included.
 
-**Это не финансовый совет.** Балл риска описывает известные ончейн-паттерны и не доказывает, что токен безопасен или опасен. Текущая версия не хранит приватные ключи пользователей и не отправляет сделки, swap или любые транзакции от их имени.
+It ran live for about a day. Then I backtested it: **the safety checks filter
+out obvious scams, but they do not predict whether a token survives, and the
+signals had no trading edge.** The project is closed. The numbers are in
+[Results](#results).
 
-Источник запретов и стека: [`AGENTS.md`](AGENTS.md).
+Not financial advice. The bot never held private keys and never sent a
+transaction.
 
-## Как устроено
+## What it does
+
+1. **Discovery.** A PumpPortal WebSocket streams every new token and every
+   migration from the pump.fun bonding curve to PumpSwap (~18,000 launches a day).
+2. **Risk scan** (Helius RPC): mint and freeze authority, LP burn share,
+   Token-2022 extensions, top-10 holder share, and a funder graph. The funder
+   graph walks each top holder's first funding transfer to find wallets paid
+   from one source, and measures how much supply the creator's cluster holds.
+3. **Checklist.** 12 lines, each pass, fail, or no data. No data never counts
+   as a pass. A signal needs 4 required lines plus at least 9 of 12. Market
+   lines (liquidity, 5-minute buys vs sells) come from DexScreener. Socials
+   come from the token's IPFS metadata. Launch trades are counted from the
+   bonding curve's earliest signatures.
+4. **Delivery.** A signal card goes to subscribers in Telegram, with an
+   optional AI note (Groq) that only restates the checklist.
+5. **Public track record.** Each signal is posted to a channel at the moment
+   it fires, so Telegram's timestamp is the proof. Results follow as replies
+   with an ASCII market-cap chart. A result without a reading in time is
+   marked skipped, never filled in.
+
+Signal card in the bot (illustrative values). Each token gets an ASCII mascot
+chosen from a hash of its mint:
+
+```
+ [o_o]    MCap  $51.7k
+ /|_|\    Liq   $17.8k
+  d b     5m    66 buy/10 sell
+
+Safety   ▰▰▰▰▰▰▰▰▰▱▱▱ 9/12
+
+Contract ████ 4/4
+ ✓ Mint revoked
+ ✓ Freeze revoked
+ ✓ LP burned ≥95%
+ ✓ No fee/hook/delegate
+
+Holders  ██░░ 2/4
+ ✗ Top-10 >50%
+ ✓ No funder cluster
+ ✓ Creator 5% (≤30%)
+ ✗ Launch trades 8 (≤3)
+
+Market   ███░ 3/4
+ ✓ Liq $17.8k (≥$10k)
+ ✓ 5m 66 buy/10 sell
+ ✗ Ticker clones: 2
+ ✓ Socials (unverified)
+```
+
+Result reply in the channel (example rendering):
+
+```
+  $120k┤    ███
+       │  ▂▂███▅▅▅
+       │▁▁████████
+       │██████████▅▅▅▅▅
+  $3.6k┤███████████████▂▂▂▂▁
+       └────────────────────
+        0m      30m      60m
+```
+
+## Architecture
 
 ```mermaid
 flowchart LR
-  subgraph ingest [Приём]
-    Helius[Helius webhook]
-    API[FastAPI api]
-  end
-  subgraph data [Данные]
-    PG[(PostgreSQL + TimescaleDB)]
-    Redis[(Redis)]
-  end
-  subgraph jobs [Фоновые задачи]
-    Worker[worker]
-    Risk[risk_scan]
-    Bait[bait_check]
-    Fusion[signal_fusion]
-    Alerts[alert_dispatcher]
-  end
-  TG[Telegram]
-
-  Helius -->|POST /webhooks/helius| API
-  API -->|wallet_txs, tokens| PG
-  API -->|risk_scan_queue stream| Redis
-  Risk -->|risk_heavy_queue stream| Redis
-  API -->|bait_check_queue sorted set| Redis
-  Worker --> Risk
-  Worker --> Bait
-  Worker --> Fusion
-  Worker --> Alerts
-  Risk -->|XREADGROUP + trace_id| Redis
-  Risk -->|risk_score, funder graph| PG
-  Bait -->|созревшие задачи| Redis
-  Bait -->|bait_flags| PG
-  Fusion -->|signals| PG
-  Alerts -->|notify| TG
-  API -->|GET /metrics| Prom[Prometheus scrape]
+  PP[PumpPortal WS] --> Disc[token_discovery]
+  Disc -->|risk_scan_queue| Redis[(Redis streams)]
+  Redis --> Risk[risk_scan + funder graph]
+  Risk -->|Helius RPC| Helius[(Solana)]
+  Risk --> PG[(PostgreSQL + TimescaleDB)]
+  PG --> Fusion[signal_fusion: 12-line checklist]
+  Fusion -->|DexScreener, IPFS| Ext[market + metadata]
+  Fusion --> PG
+  PG --> Alerts[alert_dispatcher] --> Bot[Telegram bot]
+  PG --> Channel[channel_publisher] --> Pub[Public channel]
+  Sampler[market_sampler] --> PG
+  Outcomes[outcome jobs: listing, 1h, 24h, 7d] --> PG
 ```
 
-Один buy получает `trace_id`. Он пишется в сообщение `risk_scan_queue`, затем в `tokens.trace_id` и `signals.trace_id`. Логи `webhook_handled`, `risk_scan_stored`, `signal_created` и `alert_sent` содержат это поле, так что одну покупку видно через весь путь.
+One worker process runs all loops under asyncio. External calls go only
+through `app/adapters`. Every token carries a `trace_id` from discovery to the
+alert, so one token can be followed through the logs.
 
-## Локальный запуск
+Built to run on free tiers: Helius free RPC (10 RPS, 1M credits/month) is the
+binding limit. A Redis daily request budget and a scan funnel brought RPC
+spend from ~345 to ~2 requests a minute.
 
-1. `cp .env.example .env`
-2. `docker compose up --build`
-3. `curl localhost:8000/health` → `{"status":"ok","db":"connected","redis":"connected"}`
+## Stack
 
-Compose для разработки сам подставляет `DATABASE_URL` и `REDIS_URL`. Плейсхолдер `replace-me` не включает Telegram polling и публичный API (ответ 503, пока не задан настоящий ключ).
+Python 3.12 · asyncio · FastAPI · SQLAlchemy 2 (async) + Alembic ·
+PostgreSQL 16 + TimescaleDB · Redis streams · python-telegram-bot · httpx ·
+Docker Compose · pytest + testcontainers (343 tests) · ruff · mypy · structlog ·
+Prometheus metrics
 
-Миграции:
+## Results
+
+Data from 2026-10-15 to 2026-10-16. The backtest code is not in the
+repository; it read the stored scans and current DexScreener prices.
+
+**Base rate.** Of 217 scanned tokens that migrated, 88% were dead a day later
+(market cap under $15k or liquidity under $3k). The median market cap was
+about $1.9k.
+
+**Death rate by check** (dead when the line passed vs. when it failed):
+
+| Check | Passed | Failed |
+|---|---|---|
+| Top-10 holder share | 90% (n=70) | 88% (n=147) |
+| Creator share ≤30% | 88% (n=43) | 83% (n=70) |
+| Funder cluster | 87% (n=185) | 94% (n=18) |
+| LP burned | 88% (n=203) | 100% (n=12) |
+| Unique ticker | 84% (n=81) | 89–97% |
+| Signalled by the bot | 85% (n=39) | 89% (rest) |
+| **1h price ≥ listing price** | **55% (n=11)** | **92% (n=65)** |
+
+**Signals.** The 17 signals with a 1h result had a median change of −67% at
+1h. 7 lost 90% or more, and 1 doubled. A simulated exit at +30% take-profit or
+−20% stop-loss on 12 checklist signals averaged −1.7% per trade, before fees
+and slippage.
+
+**What I learned**
+
+- The safety checks catch blunt scams such as a live mint authority or
+  unburned LP. Soft rugs pass all 12 lines.
+- Momentum after an hour was the only signal with any strength, and 11 tokens
+  are too few to rely on it.
+- Relaxing a filter that showed no predictive power still made the signals
+  worse. Making the creator-share line optional let celebrity-name tickers
+  through. Backtests on one outcome measure miss what a filter does
+  indirectly.
+- On a free RPC tier, the creator share could be measured for only 13% of
+  tokens. A required check with that much missing data mostly throttles the
+  signal flow.
+
+## Running it
+
+Operations notes in Russian (setup, deploy, Helius webhook, budgets,
+migration rollback): [`docs/operations.ru.md`](docs/operations.ru.md).
 
 ```bash
-docker compose up -d postgres
+cp .env.example .env        # fill in the keys
+docker compose up -d --build
 uv run alembic upgrade head
+uv run pytest -q            # needs Docker for testcontainers
 ```
 
-Образ Postgres: `timescale/timescaledb:2.30.1-pg16-oss`.
-
-Откат ревизии `0015` — в разделе «Откат ревизии 0015» ниже. Сначала останавливается worker, потом удаляется ключ Redis, и только затем `alembic downgrade`.
-
-## Как создать Helius webhook вручную перед первым запуском
-
-Бот webhook не создаёт. Один раз его заводит человек в кабинете, дальше `/watch` только дописывает адрес в `accountAddresses` через `PUT /v0/webhooks/{id}`.
-
-1. Откройте [Helius Dashboard → Webhooks](https://dashboard.helius.dev/webhooks) под ключом из `HELIUS_API_KEY`.
-2. Create Webhook. Network: **Mainnet**.
-3. Webhook type: **Enhanced** (`enhanced`, не `enhancedDevnet`).
-4. Transaction types: **SWAP** и **TRANSFER**.
-5. Webhook URL: публичный `https://<ваш-хост>/webhooks/helius`. Локальный `localhost` Helius не вызовет.
-6. Authentication header: та же строка, что `HELIUS_WEBHOOK_SECRET`. Helius присылает её в `Authorization`, и API сравнивает значение целиком.
-7. Account addresses можно оставить пустым. Адреса добавит `/watch`.
-8. Сохраните webhook и скопируйте его id в `HELIUS_WEBHOOK_ID`.
-9. Перезапустите worker. Пока id пустой, `/watch` отвечает, что webhook не задан, и строку в базу не пишет.
-
-Документация метода: [Webhooks API](https://www.helius.dev/docs/api-reference/webhooks/llms.txt). Обновление адреса читает текущий webhook и отправляет обратно `webhookURL`, `webhookType`, `transactionTypes` и новый `accountAddresses`, чтобы PUT не стёр тип событий.
-
-## Деплой
-
-Продакшен-файл не монтирует код. API и worker используют один собранный образ `signalforge:prod`. У каждого сервиса есть healthcheck, `restart: unless-stopped` и лимит CPU/памяти. Postgres и Redis наружу не публикуются.
-
-```bash
-export POSTGRES_USER=signalforge
-export POSTGRES_PASSWORD='…'
-export POSTGRES_DB=signalforge
-export HELIUS_API_KEY='…'
-export HELIUS_WEBHOOK_SECRET='…'
-export TELEGRAM_BOT_TOKEN='…'
-export PUBLIC_API_KEY='…'
-docker compose -f docker-compose.prod.yml up -d --build
-docker compose -f docker-compose.prod.yml exec api alembic upgrade head
-```
-
-Проверка: `curl localhost:8000/health` и `curl localhost:8000/metrics`.
-
-## Откат ревизии 0015
-
-Снимки `+1h`, `+24h` и `+7d` лежат в Redis-ключе `signalforge:outcome:pending`. Его пишет и читает процесс `worker` (`python -m app.workers.runner`), не миграция. Пока worker запущен, созревший горизонт он записывает в `outcome_checks`.
-
-`alembic downgrade` эту таблицу удаляет и ключ не трогает. Если worker в этот момент ещё работает, запись результата падает: таблицы уже нет, член остаётся в наборе и крутится на каждом опросе. Уже снятые цены при откате схемы тоже уходят вместе с таблицей.
-
-Порядок такой. Не менять его местами.
-
-```bash
-docker compose -f docker-compose.prod.yml stop worker
-docker compose -f docker-compose.prod.yml exec redis redis-cli DEL signalforge:outcome:pending
-docker compose -f docker-compose.prod.yml exec api alembic downgrade 0014_funder_cache_signature
-```
-
-`0014_funder_cache_signature` — родитель ревизии `0015`, не «какая-то предыдущая». Команда откатывает схему ровно до неё. Она верна, только пока голова — `0015`. Если позже появится `0016` или ещё одна ревизия, эту команду не копировать: она снимет и всё, что накатили после `0015`. Раздел нужно переписать под фактическую голову.
-
-`DEL` по ключу, которого ещё нет, завершается без ошибки и печатает `0`. Так и должно быть, если откат случился до первого пула и набор не создавался. `0` не повод останавливать процедуру.
-
-Локально то же самое: `docker compose stop worker`, затем `docker compose exec redis redis-cli DEL signalforge:outcome:pending`, затем `uv run alembic downgrade 0014_funder_cache_signature`.
-
-После этого не поднимать текущий worker на откатанной схеме. Сначала образ без этой ревизии, потом `docker compose -f docker-compose.prod.yml start worker`.
-
-Worker читает `.env` один раз при старте. Новый `HELIUS_API_KEY` подхватывается только после перезапуска процесса (`docker compose restart worker`, локально — остановить и снова запустить `python -m app.workers.runner`).
-
-При старте worker выходит с ошибкой, если `HELIUS_API_KEY` пустой или равен `replace-me`, и если `alembic_version` не совпадает с головой миграций в этом дереве. Голова читается из `alembic/versions`, а не из номера, зашитого в проверку. Уже запущенный процесс эта проверка не останавливает.
-
-Перед первым запуском на живых пользователях нужны ключ Helius, секрет webhook, токен бота из BotFather и `PUBLIC_API_KEY`, отличный от `replace-me`.
-
-## Бюджет Helius
-
-Worker рассчитан на бесплатный план Helius: 10 запросов в секунду и 1 млн кредитов в месяц. Стандартные RPC-методы стоят 1 кредит. Платный `funded-by` (403 на бесплатном плане) по умолчанию выключен: `FUNDER_LOOKUP_METHOD = "rpc"`.
-
-- `HELIUS_MAX_REQUESTS_PER_SECOND` (8): клиент выдерживает паузу между запросами и не упирается в 429.
-- `HELIUS_DAILY_REQUEST_BUDGET` (30 000): дневной лимит запросов в Redis-ключе `helius:requests:<YYYYMMDD>` (UTC). Когда он исчерпан, клиент не отправляет запрос и бросает `HeliusBudgetExceeded`, а в логе пишется `helius_budget_exhausted`. Новые сканы ждут следующих суток.
-- `MAX_FUNDING_LOOKUP_SIGNATURES` (1000): поиск первого пополнения читает одну страницу истории. Кошелёк с более длинной историей сохраняется как самостоятельный корень (строка `wallet_funders`, где `wallet == funder`) и не валит граф всего токена.
-- Тяжёлый скан не ставится в очередь, если по быстрым проверкам сигнал уже невозможен. Тогда `heavy_scan_status = skipped`, а в логе пишется `risk_heavy_skipped` с причиной.
-
-- `DISCOVERY_QUALIFY_PRE_MIGRATION` (False): токены на бонд-кривой pump.fun сохраняются, но держатели не опрашиваются. На кривой проверка LP и граф фандеров недоступны, поэтому сигнал невозможен, а опросы съедали большую часть бюджета. Полный скан запускается по событию миграции PumpPortal. Токены, созданные до старта worker, при миграции пропускаются: в событии нет адреса создателя.
-- `POST_MIGRATION_RETRY_DELAYS_SECONDS` (20, 60, 180): если сразу после миграции RPC ещё не видит пул PumpSwap, быстрый скан повторяется с этими задержками и только потом получает `skipped`.
-- LP PumpSwap: pump.fun сжигает LP при миграции, и выпуск LP-минта падает до 0. Проверка считает сожжённую долю от `Pool.lp_supply` (столько LP было выпущено в пул) и не считает нулевой выпуск риском.
-
-Расход за текущие сутки: `docker compose exec redis redis-cli GET helius:requests:$(date -u +%Y%m%d)`.
-
-Для замера по методам запустите worker с `LOG_LEVEL=DEBUG`: каждый запрос пишет `helius_request` с `rpc_method`.
-
-## Переменные окружения
-
-| Переменная | Зачем |
-| --- | --- |
-| `DATABASE_URL` | `postgresql+asyncpg://…` |
-| `REDIS_URL` | `redis://` или `rediss://` |
-| `HELIUS_API_KEY` | Ключ Helius. В URL не класть. |
-| `HELIUS_WEBHOOK_SECRET` | Полное значение заголовка `Authorization`, которое Helius повторяет из `authHeader`. |
-| `HELIUS_WEBHOOK_ID` | Id webhook, созданного один раз в Helius Dashboard. Пусто — `/watch` не сохраняет кошелёк. |
-| `HELIUS_API_BASE_URL` | По умолчанию `https://api.helius.xyz`. |
-| `HELIUS_RPC_URL` | По умолчанию `https://mainnet.helius-rpc.com`. |
-| `RAYDIUM_API_BASE_URL` | По умолчанию `https://api-v3.raydium.io`. |
-| `TELEGRAM_BOT_TOKEN` | Токен BotFather. Пусто или `replace-me` — бот не стартует. |
-| `TELEGRAM_ADMIN_IDS` | Числовые Telegram id через запятую. Эти id получают `role=admin` при `/start`. Пусто — админов нет, регистрация и алерты остаются. |
-| `PUBLIC_API_KEY` | Секрет заголовка `X-API-Key`. Пусто или `replace-me` — публичное API отвечает 503. |
-| `API_RATE_LIMIT_PER_MINUTE` | Лимит на один ключ. По умолчанию 60. |
-| `ANTHROPIC_API_KEY` | Зарезервировано, в MVP не вызывается. |
-| `TWITTER_BEARER_TOKEN` | Зарезервировано, модуля Twitter нет. |
-| `GROQ_API_KEY` | Ключ Groq для AI review. Пусто — живые вызовы выключены. |
-| `AI_REVIEW_MODEL` | Id модели Groq. По умолчанию `openai/gpt-oss-120b`. |
-| `ENVIRONMENT` | `dev` или `prod`. |
-| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
-
-Секреты только в окружении или локальном `.env`. `.env` не коммитится.
-
-## API
-
-- `POST /webhooks/helius` — приём Helius, без `X-API-Key`.
-- `GET /health` — Postgres и Redis.
-- `GET /metrics` — Prometheus: обработанные webhook, отправленные алерты, латентность быстрого risk scan, размер `risk_scan_queue`, `risk_heavy_queue` и `bait_check_queue`.
-- `/docs` — публичное API: watchlist, сигналы, риск токена, настройки пользователя. Заголовок `X-API-Key`.
-
-## Проверки
-
-```bash
-uv sync --group dev
-uv run ruff check app tests
-uv run mypy --strict app/services app/adapters
-uv run pytest --cov=app/services --cov-report=term-missing --cov-fail-under=70
-```
-
-CI: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) на `push` и `pull_request`. Перед коммитом gitleaks ставится через [`.pre-commit-config.yaml`](.pre-commit-config.yaml):
-
-```bash
-pip install pre-commit
-pre-commit install
-pre-commit run --all-files
-```
-
-`tests/test_models.py` нужен Postgres с TimescaleDB на `localhost:5432`. Остальные интеграционные тесты поднимают Timescale и Redis через testcontainers.
-
-## Модель Groq
-
-Ревью по умолчанию идёт в `openai/gpt-oss-120b` (`AI_REVIEW_MODEL`). Groq регулярно снимает модели с эксплуатации и предупреждает примерно за 60 дней. Это повторяющийся тип отказа этого провайдера, не разовый случай: перед живым прогоном стоит сверяться с [deprecations](https://console.groq.com/docs/deprecations). Смена id — через `AI_REVIEW_MODEL`, без правки кода. Опубликованный free-tier ряд этой модели (30 RPM, 1 000 RPD, 8 000 TPM, 200 000 TPD) лежит на [rate limits](https://console.groq.com/docs/rate-limits); точные цифры организации — на странице Limits в кабинете.
-
-## Вне этой версии
-
-Исполнение сделок и модуль Twitter не реализованы и не должны появляться без отдельного решения. Авто-отправка транзакций от имени пользователя запрещена.
+Project rules (fixed stack, no private keys, no trade execution):
+[`AGENTS.md`](AGENTS.md).

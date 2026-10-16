@@ -13,7 +13,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.adapters.dexscreener import DexQuote, DexScreenerPrices
 from app.adapters.token_metadata import TokenMetadataClient, TokenMetadataError, ipfs_path
 from app.adapters.token_security import MintView, _mint_view
-from app.config import QUALITY_MAX_LAUNCH_TRADES, QUALITY_MIN_PASSED, QUALITY_TREND_TICKER_MIN
+from app.config import (
+    QUALITY_MAX_LAUNCH_TRADES,
+    QUALITY_MIN_PASSED,
+    QUALITY_TREND_TICKER_MIN,
+    SIGNAL_CONFIRM_ENABLED,
+)
 from app.db.models import Signal, Token
 from app.services.quality_checks import (
     FAIL,
@@ -334,7 +339,7 @@ def test_card_shows_every_line_with_its_icon_and_the_rule() -> None:
 def test_explainer_names_every_required_line() -> None:
     text = checks_explained_text()
     assert text.count("Required.") == 4
-    assert "Confirmed signal" in text
+    assert ("Confirmed signal" in text) == SIGNAL_CONFIRM_ENABLED
     assert f"at least {QUALITY_MIN_PASSED} of 12" in text
 
 

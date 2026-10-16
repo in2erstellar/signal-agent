@@ -22,6 +22,7 @@ from app.config import (
     QUALITY_TREND_TICKER_MIN,
     RISK_ICON_LOW_MAX,
     RISK_ICON_MED_MAX,
+    SIGNAL_CONFIRM_ENABLED,
     SIGNAL_KIND_CONFIRMED,
     SIGNAL_MAX_CREATOR_SHARE,
 )
@@ -89,6 +90,12 @@ CONFIRMED_RULE = (
     "? means no data."
 )
 QUALITY_NOTE = "Safety filter only. It does not predict price."
+CONFIRMED_EXPLAINED = (
+    f"{ICON_CONFIRM} <b>Confirmed signal</b>: for a token with no early signal. "
+    "The price 1h after listing is at or above the listing price and still is; "
+    "mint, freeze, LP, and liquidity pass. In our first backtest, tokens that "
+    "held 1h died far less often. Later, so the entry is higher."
+)
 HOW_CHECKS_BUTTON = "🔍 How checks work"
 CHANNEL_CARD_BUTTON = "🔍 Full checklist in the bot"
 
@@ -273,10 +280,7 @@ def checks_explained_text() -> str:
             "",
             f"<b>Early signal</b>: every required line passes and at least "
             f"{QUALITY_MIN_PASSED} of 12 lines pass. Sent minutes after migration.",
-            f"{ICON_CONFIRM} <b>Confirmed signal</b>: for a token with no early signal. "
-            "The price 1h after listing is at or above the listing price and still is; "
-            "mint, freeze, LP, and liquidity pass. In our first backtest, tokens that "
-            "held 1h died far less often. Later, so the entry is higher.",
+            *([CONFIRMED_EXPLAINED] if SIGNAL_CONFIRM_ENABLED else []),
             "Thresholds are hand-picked starting values and may change once the "
             "track record shows which lines matter.",
             "",
