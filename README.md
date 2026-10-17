@@ -1,5 +1,7 @@
 # SignalForge
 
+📢 **Live output of the bot:** [t.me/wBRsignals](https://t.me/wBRsignals)
+
 A Telegram bot that watched every new Solana memecoin on pump.fun, ran a
 12-line on-chain safety checklist on each token that migrated to a DEX, and
 posted every signal to a public channel with its 1h, 24h, and 7d results, losses
